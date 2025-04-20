@@ -1,0 +1,4 @@
+crop_prices.csv filter=lfs diff=lfs merge=lfs -text
+suitability_data_maize.csv filter=lfs diff=lfs merge=lfs -text
+suitability_data_rice.csv filter=lfs diff=lfs merge=lfs -text
+suitability_data_soya.csv filter=lfs diff=lfs merge=lfs -text

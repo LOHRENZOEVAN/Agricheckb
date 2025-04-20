@@ -1,0 +1,11 @@
+# Requirements file (requirements.txt)
+
+flask
+flask-cors
+numpy
+pandas
+scikit-learn
+xgboost
+requests
+python-dotenv
+
