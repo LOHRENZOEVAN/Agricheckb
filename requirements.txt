@@ -8,4 +8,4 @@ scikit-learn
 xgboost
 requests
 python-dotenv
-
+gunicorn
