@@ -409,22 +409,46 @@ def process_seasonal_forecast(forecast_data):
         # Extract the necessary data from the seasonal forecast
         monthly_info = forecast_data.get("data_seasonalmonthly", {})
         
+        # Log what we received for debugging
+        logger.info(f"Seasonal data keys: {monthly_info.keys()}")
+        
         # Get available months
         months = monthly_info.get("time", [])
         
         # Process each month's data
         for i, month in enumerate(months):
             try:
+                # For temperature anomaly, collect values from all models for this month
+                temp_anomaly_values = []
+                if "temperature_meananomaly" in monthly_info:
+                    for model_index in range(len(monthly_info["temperature_meananomaly"])):
+                        if (model_index < len(monthly_info["temperature_meananomaly"]) and 
+                            i < len(monthly_info["temperature_meananomaly"][model_index])):
+                            value = monthly_info["temperature_meananomaly"][model_index][i]
+                            if value is not None:  # Filter out null values
+                                temp_anomaly_values.append(value)
+                
+                # For precipitation anomaly, collect values from all models for this month
+                precip_anomaly_values = []
+                if "precipitation_meananomaly" in monthly_info:
+                    for model_index in range(len(monthly_info["precipitation_meananomaly"])):
+                        if (model_index < len(monthly_info["precipitation_meananomaly"]) and 
+                            i < len(monthly_info["precipitation_meananomaly"][model_index])):
+                            value = monthly_info["precipitation_meananomaly"][model_index][i]
+                            if value is not None:  # Filter out null values
+                                precip_anomaly_values.append(value)
+                
                 # Create a monthly data object with available metrics
                 month_data = {
                     "month": month,
                     "temperature": {
-                        "mean_anomaly": monthly_info.get("temperature_meananomaly", [])[i] if "temperature_meananomaly" in monthly_info and i < len(monthly_info["temperature_meananomaly"]) else None,
+                        "mean_anomaly": temp_anomaly_values,  # Array of values from all models
                         "prob_above_avg": monthly_info.get("temperature_probability_above_average", [])[i] if "temperature_probability_above_average" in monthly_info and i < len(monthly_info["temperature_probability_above_average"]) else None,
                         "prob_below_avg": monthly_info.get("temperature_probability_below_average", [])[i] if "temperature_probability_below_average" in monthly_info and i < len(monthly_info["temperature_probability_below_average"]) else None,
                         "prob_normal": monthly_info.get("temperature_probability_near_normal", [])[i] if "temperature_probability_near_normal" in monthly_info and i < len(monthly_info["temperature_probability_near_normal"]) else None
                     },
                     "precipitation": {
+                        "mean_anomaly": precip_anomaly_values,  # Array of values from all models
                         "anomaly_pct": monthly_info.get("precipitationanomaly_percentage_from_normal", [])[i] if "precipitationanomaly_percentage_from_normal" in monthly_info and i < len(monthly_info["precipitationanomaly_percentage_from_normal"]) else None,
                         "prob_above_avg": monthly_info.get("precipitation_probability_above_average", [])[i] if "precipitation_probability_above_average" in monthly_info and i < len(monthly_info["precipitation_probability_above_average"]) else None,
                         "prob_below_avg": monthly_info.get("precipitation_probability_below_average", [])[i] if "precipitation_probability_below_average" in monthly_info and i < len(monthly_info["precipitation_probability_below_average"]) else None,
@@ -557,25 +581,66 @@ class CropRiskAssessment:
                 
                 # Get precipitation data
                 precip = month.get("precipitation", {})
-                precip_anomaly = safe_float(precip.get("anomaly_pct"), 0)
+                
+                # Handle array of values for precipitation mean anomaly
+                precip_anomaly_array = precip.get("mean_anomaly", [])
+                # Calculate average if we have values, otherwise use 0
+                precip_anomaly = sum(precip_anomaly_array) / len(precip_anomaly_array) if precip_anomaly_array else 0
+                
+                # Get probability values (these aren't arrays)
                 precip_below = safe_float(precip.get("prob_below_avg"), 0)
                 precip_above = safe_float(precip.get("prob_above_avg"), 0)
                 
                 # Get temperature data
                 temp = month.get("temperature", {})
-                temp_anomaly = safe_float(temp.get("mean_anomaly"), 0)
+                
+                # Handle array of values for temperature mean anomaly
+                temp_anomaly_array = temp.get("mean_anomaly", [])
+                # Calculate average if we have values, otherwise use 0
+                temp_anomaly = sum(temp_anomaly_array) / len(temp_anomaly_array) if temp_anomaly_array else 0
+                
+                # Get probability values (these aren't arrays)
                 temp_above = safe_float(temp.get("prob_above_avg"), 0)
                 temp_below = safe_float(temp.get("prob_below_avg"), 0)
+                
+                # If no probability data is available, estimate from anomalies
+                if precip_below == 0 and precip_above == 0 and precip_anomaly_array:
+                    # If precipitation anomaly is negative, increase below-average probability
+                    avg_precip_anomaly = sum(p for p in precip_anomaly_array if p is not None) / len([p for p in precip_anomaly_array if p is not None]) if any(p is not None for p in precip_anomaly_array) else 0
+                    if avg_precip_anomaly < -5:  # Significant negative anomaly
+                        precip_below = min(abs(avg_precip_anomaly) * 2, 80)  # Scale up to max 80%
+                    elif avg_precip_anomaly > 5:  # Significant positive anomaly
+                        precip_above = min(avg_precip_anomaly * 2, 80)  # Scale up to max 80%
+                
+                if temp_below == 0 and temp_above == 0 and temp_anomaly_array:
+                    # If temperature anomaly is significant, increase probability accordingly
+                    avg_temp_anomaly = sum(t for t in temp_anomaly_array if t is not None) / len([t for t in temp_anomaly_array if t is not None]) if any(t is not None for t in temp_anomaly_array) else 0
+                    if avg_temp_anomaly < -0.5:  # Cooler than normal
+                        temp_below = min(abs(avg_temp_anomaly) * 40, 80)  # Scale up to max 80%
+                    elif avg_temp_anomaly > 0.5:  # Warmer than normal
+                        temp_above = min(avg_temp_anomaly * 40, 80)  # Scale up to max 80%
                 
                 # Calculate risks for this month
                 # Drought risk - high if precipitation below average and temperature above average
                 month_drought_risk = (precip_below / 100.0) * (temp_above / 100.0)
                 
+                # If probabilities are 0 but we have significant anomalies, use those
+                if month_drought_risk == 0 and precip_anomaly < -10 and temp_anomaly > 0.5:
+                    month_drought_risk = min(abs(precip_anomaly) / 50, 0.8) * min(temp_anomaly / 2, 0.8)
+                
                 # Flood risk - high if precipitation above average
                 month_flood_risk = precip_above / 100.0
                 
+                # If probabilities are 0 but we have significant anomalies, use those
+                if month_flood_risk == 0 and precip_anomaly > 10:
+                    month_flood_risk = min(precip_anomaly / 50, 0.8)
+                
                 # Temperature risk - extreme temperatures in either direction
                 month_temp_risk = max(temp_above, temp_below) / 100.0
+                
+                # If probabilities are 0 but we have significant anomalies, use those
+                if month_temp_risk == 0 and abs(temp_anomaly) > 0.8:
+                    month_temp_risk = min(abs(temp_anomaly) / 2, 0.8)
                 
                 # Weight risks by probability confidence
                 drought_risk += month_drought_risk
