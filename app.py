@@ -1054,63 +1054,90 @@ def get_weather_forecast_endpoint():
             'message': f'Server error: {str(e)}'
         }), 500
 
-@app.route('/assess-crop-risk', methods=['POST'])
+# SOLUTION 1: Add both GET and POST methods to the same endpoint
+@app.route('/assess-crop-risk', methods=['GET', 'POST'])
 def assess_crop_risk():
-    """Endpoint to assess crop risk based on coordinates"""
+    """Endpoint to assess crop risk - ACCEPTS BOTH GET AND POST"""
     try:
-        # Parse request data safely
-        try:
-            data = request.get_json(silent=True)
-        except Exception as e:
-            logger.error(f"Error parsing JSON: {str(e)}")
-            data = None
+        # Handle both GET and POST requests
+        if request.method == 'GET':
+            # Extract parameters from query string for GET requests
+            latitude = request.args.get('latitude')
+            longitude = request.args.get('longitude')
+            elevation = request.args.get('elevation')
+            crop_type = request.args.get('crop_type')
+            field_location = request.args.get('field_location')
+            crop = request.args.get('crop', '').lower()
             
-        if not data or not isinstance(data, dict):
-            return jsonify({
-                'status': 'error',
-                'message': 'Invalid JSON data format or empty request'
-            }), 400
-        
-        # Extract and validate required parameters
-        latitude = data.get('latitude')
-        longitude = data.get('longitude')
-        
-        if latitude is None or longitude is None:
-            return jsonify({
-                'status': 'error',
-                'message': 'Missing required parameters: latitude and longitude'
-            }), 400
-        
-        try:
-            latitude = float(latitude)
-            longitude = float(longitude)
-        except (ValueError, TypeError):
-            return jsonify({
-                'status': 'error',
-                'message': 'Invalid coordinates format. Latitude and longitude must be numbers.'
-            }), 400
+            # Validate required parameters
+            if latitude is None or longitude is None:
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Missing required parameters: latitude and longitude'
+                }), 400
             
+            # Convert to appropriate types
+            try:
+                latitude = float(latitude)
+                longitude = float(longitude)
+                if elevation is not None:
+                    elevation = int(elevation)
+            except (ValueError, TypeError):
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Invalid parameter format'
+                }), 400
+                
+        elif request.method == 'POST':
+            # Handle POST requests (original logic)
+            try:
+                data = request.get_json(silent=True)
+            except Exception as e:
+                logger.error(f"Error parsing JSON: {str(e)}")
+                data = None
+                
+            if not data or not isinstance(data, dict):
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Invalid JSON data format or empty request'
+                }), 400
+            
+            # Extract parameters from JSON body
+            latitude = data.get('latitude')
+            longitude = data.get('longitude')
+            elevation = data.get('elevation')
+            crop_type = data.get('crop_type')
+            field_location = data.get('field_location')
+            crop = data.get('crop', '').lower()
+            
+            # Validate required parameters
+            if latitude is None or longitude is None:
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Missing required parameters: latitude and longitude'
+                }), 400
+            
+            try:
+                latitude = float(latitude)
+                longitude = float(longitude)
+                if elevation is not None:
+                    elevation = int(elevation)
+            except (ValueError, TypeError):
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Invalid coordinates format. Latitude and longitude must be numbers.'
+                }), 400
+        
+        # Validate coordinate ranges
         if not (-90 <= latitude <= 90) or not (-180 <= longitude <= 180):
             return jsonify({
                 'status': 'error',
                 'message': 'Invalid coordinate values. Latitude must be between -90 and 90, longitude between -180 and 180.'
             }), 400
         
-        # Extract and validate optional parameters
-        elevation = data.get('elevation')
-        crop_type = data.get('crop_type')
-        field_location = data.get('field_location')
-        crop = data.get('crop', '').lower()
+        # Log the request for debugging
+        logger.info(f"Risk assessment request: {request.method} - lat:{latitude}, lon:{longitude}, crop:{crop_type}")
         
-        if elevation is not None:
-            try:
-                elevation = int(elevation)
-            except (ValueError, TypeError):
-                return jsonify({
-                    'status': 'error',
-                    'message': f'Invalid elevation format. Must be an integer.'
-                }), 400
-                
         # Check if price data is available
         if global_price_data.empty:
             return jsonify({
@@ -1218,6 +1245,7 @@ def assess_crop_risk():
         
         return jsonify({
             'status': 'success',
+            'method_used': request.method,  # Show which method was used
             'location': {
                 'latitude': latitude,
                 'longitude': longitude,
