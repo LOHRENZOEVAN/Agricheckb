@@ -894,7 +894,90 @@ def get_suitability_for_crop(crop, lat, lon):
         logger.error(f"Error getting suitability for crop {crop}: {str(e)}")
         return 50  # Default medium suitability on error
 
-# API Routes
+# ================================================================
+# ROOT AND HEALTH CHECK ROUTES - FIXES 404 ERRORS
+# ================================================================
+
+@app.route('/', methods=['GET', 'HEAD'])
+def root():
+    """Root endpoint for health checks and API info - FIXES 404 ERRORS"""
+    return jsonify({
+        'status': 'success',
+        'service': 'AgriCheck Risk Assessment API',
+        'version': '1.0',
+        'message': 'API is running successfully',
+        'available_endpoints': [
+            'GET / - API health check',
+            'GET /health - Dedicated health check',
+            'GET /assess-crop-risk - Risk assessment (GET method)', 
+            'POST /assess-crop-risk - Risk assessment (POST method)',
+            'GET /suitability - Crop suitability data',
+            'GET /weather-forecast - Weather forecast data',
+            'GET /test-seasonal - Test seasonal forecast',
+            'GET /test-assess - Test assess-crop-risk endpoint'
+        ],
+        'server_time': datetime.datetime.now().isoformat(),
+        'methods_supported': {
+            'assess_crop_risk': ['GET', 'POST'],
+            'suitability': ['GET'],
+            'weather_forecast': ['GET']
+        },
+        'data_status': {
+            'price_data_loaded': not global_price_data.empty,
+            'price_data_crops': list(global_price_data.columns) if not global_price_data.empty else [],
+            'suitability_data_loaded': len(suitability_dfs) > 0,
+            'suitability_crops': list(suitability_dfs.keys()),
+            'meteoblue_api_configured': bool(METEOBLUE_API_KEY)
+        }
+    }), 200
+
+@app.route('/health', methods=['GET', 'HEAD'])
+def health_check():
+    """Dedicated health check endpoint for monitoring"""
+    return jsonify({
+        'status': 'healthy',
+        'timestamp': datetime.datetime.now().isoformat(),
+        'uptime': 'running',
+        'service': 'agricheckb-risk-api',
+        'version': '1.0'
+    }), 200
+
+@app.route('/test-assess', methods=['GET'])
+def test_assess():
+    """Quick test to verify assess-crop-risk endpoint is working"""
+    try:
+        return jsonify({
+            'status': 'success',
+            'message': 'assess-crop-risk endpoint is configured correctly',
+            'endpoint_methods': ['GET', 'POST'],
+            'test_urls': {
+                'get_example': 'https://agricheckb.onrender.com/assess-crop-risk?latitude=5.6&longitude=-0.2&crop_type=soybean',
+                'post_example': {
+                    'url': 'https://agricheckb.onrender.com/assess-crop-risk',
+                    'method': 'POST',
+                    'headers': {'Content-Type': 'application/json'},
+                    'body': {'latitude': 5.6, 'longitude': -0.2, 'crop_type': 'soybean'}
+                }
+            },
+            'data_status': {
+                'price_data_available': not global_price_data.empty,
+                'price_data_crops': list(global_price_data.columns) if not global_price_data.empty else [],
+                'suitability_crops': list(suitability_dfs.keys()),
+                'meteoblue_api': 'configured' if METEOBLUE_API_KEY else 'not_configured'
+            },
+            'sample_test': 'Visit /assess-crop-risk?latitude=5.6&longitude=-0.2&crop_type=soybean to test'
+        }), 200
+        
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'Error testing assess-crop-risk: {str(e)}'
+        }), 500
+
+# ================================================================
+# API ROUTES
+# ================================================================
+
 @app.route('/suitability', methods=['GET'])
 def get_suitability():
     """Endpoint to get crop suitability based on coordinates and crop type"""
@@ -1054,7 +1137,6 @@ def get_weather_forecast_endpoint():
             'message': f'Server error: {str(e)}'
         }), 500
 
-# SOLUTION 1: Add both GET and POST methods to the same endpoint
 @app.route('/assess-crop-risk', methods=['GET', 'POST'])
 def assess_crop_risk():
     """Endpoint to assess crop risk - ACCEPTS BOTH GET AND POST"""
@@ -1267,7 +1349,6 @@ def assess_crop_risk():
             'message': f'Server error: {str(e)}'
         }), 500
 
-# Add a test endpoint to directly test the seasonal forecast
 @app.route('/test-seasonal', methods=['GET'])
 def test_seasonal_forecast():
     """Test endpoint to verify seasonal forecast functionality"""
@@ -1349,7 +1430,49 @@ def test_seasonal_forecast():
             'message': f'Server error: {str(e)}'
         }), 500
 
+# ================================================================
+# CORS PREFLIGHT HANDLING
+# ================================================================
+
+@app.before_request
+def handle_preflight():
+    """Handle CORS preflight requests"""
+    if request.method == "OPTIONS":
+        from flask import Response
+        res = Response()
+        res.headers['X-Content-Type-Options'] = '*'
+        res.headers['Access-Control-Allow-Origin'] = '*'
+        res.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS, HEAD'
+        res.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization'
+        return res
+
+# ================================================================
+# APPLICATION STARTUP
+# ================================================================
+
 if __name__ == '__main__':
     from os import getenv
     port = int(getenv("PORT", 5000))  # Required by Render
+    
+    # Log startup information
+    logger.info("="*60)
+    logger.info("🚀 Starting AgriCheck Risk Assessment API")
+    logger.info("="*60)
+    logger.info(f"🌐 Port: {port}")
+    logger.info(f"📊 Price data loaded: {not global_price_data.empty}")
+    if not global_price_data.empty:
+        logger.info(f"📈 Available crops: {list(global_price_data.columns)}")
+    logger.info(f"🌱 Suitability data loaded: {len(suitability_dfs)} crops")
+    logger.info(f"🌤️  Meteoblue API: {'✅ Configured' if METEOBLUE_API_KEY else '❌ Not configured'}")
+    logger.info("📡 Available endpoints:")
+    logger.info("   GET  / - Root endpoint (health check)")
+    logger.info("   GET  /health - Dedicated health check")
+    logger.info("   GET  /test-assess - Test assess-crop-risk endpoint")
+    logger.info("   GET  /assess-crop-risk - Risk assessment (GET method)")
+    logger.info("   POST /assess-crop-risk - Risk assessment (POST method)")
+    logger.info("   GET  /suitability - Crop suitability data")
+    logger.info("   GET  /weather-forecast - Weather forecast data")
+    logger.info("   GET  /test-seasonal - Test seasonal forecast")
+    logger.info("="*60)
+    
     app.run(host='0.0.0.0', port=port)
