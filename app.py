@@ -435,7 +435,7 @@ class GhanaDataDrivenRiskEngine:
             return 0.5
     
     def _compute_seasonal_risk(self, seasonal_data: List[Dict], crop_params: Dict) -> float:
-        """Compute seasonal risk from forecast data"""
+        """Compute seasonal risk from forecast data with improved null handling"""
         if not seasonal_data:
             return 0.5
         
@@ -449,18 +449,50 @@ class GhanaDataDrivenRiskEngine:
                 precip = month_data.get("precipitation", {})
                 temp = month_data.get("temperature", {})
                 
-                # Extract probabilities
-                precip_below = self._safe_float(precip.get("prob_below_avg"), 0) / 100.0
-                precip_above = self._safe_float(precip.get("prob_above_avg"), 0) / 100.0
-                temp_above = self._safe_float(temp.get("prob_above_avg"), 0) / 100.0
+                # Use anomaly data if probability data is not available
+                month_risk = 0.0
                 
-                # Calculate monthly risk based on crop needs
-                if crop_params['optimal_rainfall_min'] > 800:  # High water need crops
-                    month_risk = precip_below * 1.5 + precip_above * 0.5
-                else:  # Moderate water need crops
-                    month_risk = precip_below * 1.2 + precip_above * 1.0
+                # Temperature risk from anomaly data
+                temp_anomaly = temp.get("mean_anomaly", [])
+                if temp_anomaly and len(temp_anomaly) > 0:
+                    # Calculate temperature stress from anomalies
+                    avg_temp_anomaly = np.mean([x for x in temp_anomaly if x is not None])
+                    if avg_temp_anomaly > 2.0:  # Positive anomaly (warmer than normal)
+                        month_risk += 0.4
+                    elif avg_temp_anomaly > 1.0:
+                        month_risk += 0.2
                 
-                month_risk += temp_above * 0.8  # Heat stress
+                # Precipitation risk from anomaly data  
+                precip_anomaly = precip.get("mean_anomaly", [])
+                if precip_anomaly and len(precip_anomaly) > 0:
+                    avg_precip_anomaly = np.mean([x for x in precip_anomaly if x is not None])
+                    
+                    # Determine crop water needs
+                    if crop_params['optimal_rainfall_min'] > 800:  # High water need crops
+                        if avg_precip_anomaly < -10:  # Dry conditions
+                            month_risk += 0.6
+                        elif avg_precip_anomaly > 20:  # Very wet conditions
+                            month_risk += 0.3
+                    else:  # Moderate water need crops
+                        if avg_precip_anomaly < -15:  # Very dry conditions
+                            month_risk += 0.5
+                        elif avg_precip_anomaly > 30:  # Very wet conditions
+                            month_risk += 0.4
+                
+                # Fallback to probability data if available (from the original code)
+                if month_risk == 0.0:  # No anomaly data processed successfully
+                    precip_below = self._safe_float(precip.get("prob_below_avg"), 0) / 100.0
+                    precip_above = self._safe_float(precip.get("prob_above_avg"), 0) / 100.0
+                    temp_above = self._safe_float(temp.get("prob_above_avg"), 0) / 100.0
+                    
+                    # Calculate monthly risk based on crop needs
+                    if crop_params['optimal_rainfall_min'] > 800:  # High water need crops
+                        month_risk = precip_below * 1.5 + precip_above * 0.5
+                    else:  # Moderate water need crops
+                        month_risk = precip_below * 1.2 + precip_above * 1.0
+                    
+                    month_risk += temp_above * 0.8  # Heat stress
+                
                 monthly_risks.append(min(month_risk, 1.0))
             
             return np.mean(monthly_risks) if monthly_risks else 0.5
@@ -686,7 +718,7 @@ class GhanaDataDrivenRiskEngine:
         return 1.0 - min(max(perturbed_suitability, 0.0), 1.0)
     
     def _perturb_seasonal_data(self, seasonal_data: List[Dict]) -> List[Dict]:
-        """Add stochastic perturbations to seasonal data"""
+        """Add stochastic perturbations to seasonal data with better null handling"""
         if not seasonal_data:
             return seasonal_data
         
@@ -694,14 +726,49 @@ class GhanaDataDrivenRiskEngine:
         for month in seasonal_data:
             perturbed_month = month.copy()
             
-            # Add noise to probability values
-            if "precipitation" in perturbed_month:
+            # Add noise to probability values if they exist
+            if "precipitation" in perturbed_month and perturbed_month["precipitation"]:
                 precip = perturbed_month["precipitation"]
                 for key in ['prob_below_avg', 'prob_above_avg']:
-                    if key in precip:
+                    if key in precip and precip[key] is not None:
                         noise = np.random.normal(0, 5)  # ±5% probability noise
-                        perturbed_month["precipitation"][key] = max(0, min(100, precip[key] + noise))
+                        original_value = self._safe_float(precip[key], 0)
+                        perturbed_month["precipitation"][key] = max(0, min(100, original_value + noise))
             
+            # Add noise to temperature probability values if they exist
+            if "temperature" in perturbed_month and perturbed_month["temperature"]:
+                temp = perturbed_month["temperature"]
+                for key in ['prob_below_avg', 'prob_above_avg']:
+                    if key in temp and temp[key] is not None:
+                        noise = np.random.normal(0, 5)  # ±5% probability noise
+                        original_value = self._safe_float(temp[key], 0)
+                        perturbed_month["temperature"][key] = max(0, min(100, original_value + noise))
+                        
+            # Add noise to anomaly values if they exist
+            if "precipitation" in perturbed_month and "mean_anomaly" in perturbed_month["precipitation"]:
+                anomaly_list = perturbed_month["precipitation"]["mean_anomaly"]
+                if anomaly_list:
+                    perturbed_anomalies = []
+                    for val in anomaly_list:
+                        if val is not None:
+                            noise = np.random.normal(0, 2)  # Small amount of noise to anomalies
+                            perturbed_anomalies.append(val + noise)
+                        else:
+                            perturbed_anomalies.append(val)
+                    perturbed_month["precipitation"]["mean_anomaly"] = perturbed_anomalies
+            
+            if "temperature" in perturbed_month and "mean_anomaly" in perturbed_month["temperature"]:
+                anomaly_list = perturbed_month["temperature"]["mean_anomaly"]
+                if anomaly_list:
+                    perturbed_anomalies = []
+                    for val in anomaly_list:
+                        if val is not None:
+                            noise = np.random.normal(0, 0.5)  # Small amount of noise to temperature anomalies
+                            perturbed_anomalies.append(val + noise)
+                        else:
+                            perturbed_anomalies.append(val)
+                    perturbed_month["temperature"]["mean_anomaly"] = perturbed_anomalies
+                        
             perturbed.append(perturbed_month)
         
         return perturbed
@@ -1097,9 +1164,9 @@ def process_forecast_data(forecast_data):
     return pd.DataFrame(daily_data)
 
 def process_seasonal_forecast(forecast_data):
-    """Process seasonal forecast data into a structured format"""
+    """Process seasonal forecast data into a structured format with improved handling"""
     if not forecast_data or "data_seasonalmonthly" not in forecast_data:
-        logger.warning("Empty seasonal forecast data provided")
+        logger.warning("Empty seasonal forecast data provided or missing 'data_seasonalmonthly'")
         return []
     
     monthly_data = []
@@ -1109,10 +1176,14 @@ def process_seasonal_forecast(forecast_data):
         monthly_info = forecast_data.get("data_seasonalmonthly", {})
         
         # Log what we received for debugging
-        logger.info(f"Seasonal data keys: {monthly_info.keys()}")
+        logger.info(f"Seasonal data keys: {list(monthly_info.keys())}")
         
         # Get available months
         months = monthly_info.get("time", [])
+        
+        if not months:
+            logger.warning("No time data found in seasonal forecast")
+            return []
         
         # Process each month's data
         for i, month in enumerate(months):
@@ -1120,45 +1191,88 @@ def process_seasonal_forecast(forecast_data):
                 # For temperature anomaly, collect values from all models for this month
                 temp_anomaly_values = []
                 if "temperature_meananomaly" in monthly_info:
-                    for model_index in range(len(monthly_info["temperature_meananomaly"])):
-                        if (model_index < len(monthly_info["temperature_meananomaly"]) and 
-                            i < len(monthly_info["temperature_meananomaly"][model_index])):
-                            value = monthly_info["temperature_meananomaly"][model_index][i]
-                            if value is not None:  # Filter out null values
-                                temp_anomaly_values.append(value)
+                    temp_data = monthly_info["temperature_meananomaly"]
+                    if isinstance(temp_data, list) and len(temp_data) > 0:
+                        # Handle different data structures
+                        if isinstance(temp_data[0], list):
+                            # Multi-model data (2D array)
+                            for model_data in temp_data:
+                                if i < len(model_data) and model_data[i] is not None:
+                                    temp_anomaly_values.append(model_data[i])
+                        else:
+                            # Single model data (1D array)
+                            if i < len(temp_data) and temp_data[i] is not None:
+                                temp_anomaly_values.append(temp_data[i])
                 
                 # For precipitation anomaly, collect values from all models for this month
                 precip_anomaly_values = []
                 if "precipitation_meananomaly" in monthly_info:
-                    for model_index in range(len(monthly_info["precipitation_meananomaly"])):
-                        if (model_index < len(monthly_info["precipitation_meananomaly"]) and 
-                            i < len(monthly_info["precipitation_meananomaly"][model_index])):
-                            value = monthly_info["precipitation_meananomaly"][model_index][i]
-                            if value is not None:  # Filter out null values
-                                precip_anomaly_values.append(value)
+                    precip_data = monthly_info["precipitation_meananomaly"]
+                    if isinstance(precip_data, list) and len(precip_data) > 0:
+                        # Handle different data structures
+                        if isinstance(precip_data[0], list):
+                            # Multi-model data (2D array)
+                            for model_data in precip_data:
+                                if i < len(model_data) and model_data[i] is not None:
+                                    precip_anomaly_values.append(model_data[i])
+                        else:
+                            # Single model data (1D array)
+                            if i < len(precip_data) and precip_data[i] is not None:
+                                precip_anomaly_values.append(precip_data[i])
+                
+                # Safely get probability data if available
+                def safe_get_probability(key, index):
+                    try:
+                        data = monthly_info.get(key, [])
+                        if isinstance(data, list) and index < len(data):
+                            value = data[index]
+                            return value if value is not None else None
+                        return None
+                    except (IndexError, TypeError):
+                        return None
                 
                 # Create a monthly data object with available metrics
                 month_data = {
                     "month": month,
                     "temperature": {
                         "mean_anomaly": temp_anomaly_values,  # Array of values from all models
-                        "prob_above_avg": monthly_info.get("temperature_probability_above_average", [])[i] if "temperature_probability_above_average" in monthly_info and i < len(monthly_info["temperature_probability_above_average"]) else None,
-                        "prob_below_avg": monthly_info.get("temperature_probability_below_average", [])[i] if "temperature_probability_below_average" in monthly_info and i < len(monthly_info["temperature_probability_below_average"]) else None,
-                        "prob_normal": monthly_info.get("temperature_probability_near_normal", [])[i] if "temperature_probability_near_normal" in monthly_info and i < len(monthly_info["temperature_probability_near_normal"]) else None
+                        "prob_above_avg": safe_get_probability("temperature_probability_above_average", i),
+                        "prob_below_avg": safe_get_probability("temperature_probability_below_average", i),
+                        "prob_normal": safe_get_probability("temperature_probability_near_normal", i)
                     },
                     "precipitation": {
                         "mean_anomaly": precip_anomaly_values,  # Array of values from all models
-                        "anomaly_pct": monthly_info.get("precipitationanomaly_percentage_from_normal", [])[i] if "precipitationanomaly_percentage_from_normal" in monthly_info and i < len(monthly_info["precipitationanomaly_percentage_from_normal"]) else None,
-                        "prob_above_avg": monthly_info.get("precipitation_probability_above_average", [])[i] if "precipitation_probability_above_average" in monthly_info and i < len(monthly_info["precipitation_probability_above_average"]) else None,
-                        "prob_below_avg": monthly_info.get("precipitation_probability_below_average", [])[i] if "precipitation_probability_below_average" in monthly_info and i < len(monthly_info["precipitation_probability_below_average"]) else None,
-                        "prob_normal": monthly_info.get("precipitation_probability_near_normal", [])[i] if "precipitation_probability_near_normal" in monthly_info and i < len(monthly_info["precipitation_probability_near_normal"]) else None
+                        "anomaly_pct": safe_get_probability("precipitationanomaly_percentage_from_normal", i),
+                        "prob_above_avg": safe_get_probability("precipitation_probability_above_average", i),
+                        "prob_below_avg": safe_get_probability("precipitation_probability_below_average", i),
+                        "prob_normal": safe_get_probability("precipitation_probability_near_normal", i)
                     }
                 }
                 monthly_data.append(month_data)
+                
             except Exception as e:
-                logger.error(f"Error processing month {i} of seasonal data: {str(e)}")
+                logger.error(f"Error processing month {i} ({month}) of seasonal data: {str(e)}")
+                # Still add a basic month entry to maintain structure
+                month_data = {
+                    "month": month,
+                    "temperature": {
+                        "mean_anomaly": [],
+                        "prob_above_avg": None,
+                        "prob_below_avg": None,
+                        "prob_normal": None
+                    },
+                    "precipitation": {
+                        "mean_anomaly": [],
+                        "anomaly_pct": None,
+                        "prob_above_avg": None,
+                        "prob_below_avg": None,
+                        "prob_normal": None
+                    }
+                }
+                monthly_data.append(month_data)
                 continue
         
+        logger.info(f"Successfully processed {len(monthly_data)} months of seasonal data")
         return monthly_data
     
     except Exception as e:
@@ -1273,8 +1387,8 @@ def root():
     return jsonify({
         'status': 'success',
         'service': 'AgriCheck Risk Assessment API',
-        'version': '2.0',
-        'message': 'Enhanced Ghana Data-Driven Risk Assessment API is running successfully',
+        'version': '2.1',
+        'message': 'Enhanced Ghana Data-Driven Risk Assessment API with Fixed Meteoblue Integration',
         'available_endpoints': [
             'GET / - API health check',
             'GET /health - Dedicated health check',
@@ -1298,12 +1412,11 @@ def root():
             'suitability_crops': list(suitability_dfs.keys()),
             'meteoblue_api_configured': bool(METEOBLUE_API_KEY)
         },
-        'new_features': {
-            'ghana_zone_mapping': 'GPS coordinates automatically mapped to Ghana agricultural zones',
-            'research_based_parameters': 'Crop parameters based on Ghana agricultural research',
-            'monte_carlo_simulation': 'Uncertainty quantification through Monte Carlo analysis',
-            'thermal_analysis': 'Growing Degree Days calculation and thermal stress indicators',
-            'pure_data_driven': 'Risk computation without embedded recommendations'
+        'bug_fixes_v2_1': {
+            'meteoblue_seasonal_data_handling': 'Fixed processing of seasonal anomaly data structure',
+            'monte_carlo_null_handling': 'Improved null value handling in Monte Carlo simulations',
+            'seasonal_risk_computation': 'Enhanced seasonal risk calculation using anomaly data',
+            'perturbation_robustness': 'Made data perturbation methods more robust to null values'
         }
     }), 200
 
@@ -1315,7 +1428,7 @@ def health_check():
         'timestamp': datetime.datetime.now().isoformat(),
         'uptime': 'running',
         'service': 'agricheck-ghana-risk-api',
-        'version': '2.0'
+        'version': '2.1'
     }), 200
 
 @app.route('/test-assess', methods=['GET'])
@@ -1324,7 +1437,7 @@ def test_assess():
     try:
         return jsonify({
             'status': 'success',
-            'message': 'Enhanced Ghana Risk Assessment endpoint is configured correctly',
+            'message': 'Enhanced Ghana Risk Assessment endpoint with Meteoblue fixes is configured correctly',
             'endpoint_methods': ['GET', 'POST'],
             'test_urls': {
                 'get_example': 'https://agricheckb.onrender.com/assess-crop-risk?latitude=5.6&longitude=-0.2&crop_type=soybean',
@@ -1343,7 +1456,11 @@ def test_assess():
                 'suitability_crops': list(suitability_dfs.keys()),
                 'meteoblue_api': 'configured' if METEOBLUE_API_KEY else 'not_configured'
             },
-            'sample_test': 'Visit /assess-crop-risk?latitude=5.6&longitude=-0.2&crop_type=soybean to test enhanced Ghana-specific risk assessment'
+            'fixes_implemented': {
+                'meteoblue_seasonal_parsing': 'Fixed to handle actual API response structure',
+                'monte_carlo_error_handling': 'Added robust null checking throughout simulation',
+                'seasonal_risk_anomaly_processing': 'Now uses anomaly data when probability data unavailable'
+            }
         }), 200
         
     except Exception as e:
@@ -1516,7 +1633,7 @@ def get_weather_forecast_endpoint():
 
 @app.route('/assess-crop-risk', methods=['GET', 'POST'])
 def assess_crop_risk():
-    """Enhanced endpoint for Ghana-specific crop risk assessment"""
+    """Enhanced endpoint for Ghana-specific crop risk assessment with fixed Meteoblue integration"""
     try:
         # Handle both GET and POST requests
         if request.method == 'GET':
@@ -1669,18 +1786,25 @@ def assess_crop_risk():
             crops=mapped_crops
         )
         
-        # Optional: Add Monte Carlo analysis for uncertainty
+        # Optional: Add Monte Carlo analysis for uncertainty (with improved error handling)
         monte_carlo_results = {}
         for crop_name in mapped_crops:
             if crop_name in risk_engine.CROP_PARAMETERS:
-                monte_carlo_results[crop_name] = risk_engine.run_monte_carlo_analysis(
-                    price_data=price_data_for_risk,
-                    weather_data=weather_data,
-                    suitability_data=crop_suitability,
-                    seasonal_data=monthly_data,
-                    crop=crop_name,
-                    num_simulations=500  # Adjust for performance
-                )
+                try:
+                    monte_carlo_results[crop_name] = risk_engine.run_monte_carlo_analysis(
+                        price_data=price_data_for_risk,
+                        weather_data=weather_data,
+                        suitability_data=crop_suitability,
+                        seasonal_data=monthly_data,
+                        crop=crop_name,
+                        num_simulations=500  # Adjust for performance
+                    )
+                except Exception as e:
+                    logger.error(f"Monte Carlo analysis failed for {crop_name}: {str(e)}")
+                    monte_carlo_results[crop_name] = {
+                        'error': f'Monte Carlo simulation failed: {str(e)}',
+                        'status': 'failed'
+                    }
         
         # Prepare weather data for response
         daily_weather_data = weather_data.to_dict(orient='records')
@@ -1719,7 +1843,7 @@ def assess_crop_risk():
         return jsonify({
             'status': 'success',
             'method_used': request.method,
-            'api_version': '2.0',
+            'api_version': '2.1',
             # Legacy compatibility - existing frontend code works unchanged
             'risk_assessment': legacy_risk_assessment,
             'location': {
@@ -1815,13 +1939,13 @@ def test_seasonal_forecast():
                 'status': direct_status,
                 'url': url.replace(METEOBLUE_API_KEY, "API_KEY_REDACTED"),
                 'has_data': bool(direct_response),
-                'has_monthly_data': 'data_monthly' in direct_response if direct_response else False,
+                'has_monthly_data': 'data_seasonalmonthly' in direct_response if direct_response else False,
                 'response_keys': list(direct_response.keys()) if direct_response else []
             },
             'function_call': {
                 'status': function_status,
                 'has_data': bool(function_response),
-                'has_monthly_data': 'data_monthly' in function_response if function_response else False,
+                'has_monthly_data': 'data_seasonalmonthly' in function_response if function_response else False,
                 'response_keys': list(function_response.keys()) if function_response else []
             },
             'data_processing': {
@@ -1864,7 +1988,7 @@ if __name__ == '__main__':
     
     # Log startup information
     logger.info("="*60)
-    logger.info("🚀 Starting Enhanced AgriCheck Ghana Risk Assessment API")
+    logger.info("🚀 Starting Enhanced AgriCheck Ghana Risk Assessment API v2.1")
     logger.info("="*60)
     logger.info(f"🌐 Port: {port}")
     logger.info(f"📊 Price data loaded: {not global_price_data.empty}")
@@ -1889,6 +2013,11 @@ if __name__ == '__main__':
     logger.info("   ✅ Monte Carlo uncertainty analysis")
     logger.info("   ✅ Growing Degree Days calculation")
     logger.info("   ✅ Pure data-driven risk computation")
+    logger.info("🐛 Bug Fixes in v2.1:")
+    logger.info("   ✅ Fixed Meteoblue seasonal data structure handling")
+    logger.info("   ✅ Improved Monte Carlo null value robustness")
+    logger.info("   ✅ Enhanced seasonal risk computation using anomaly data")
+    logger.info("   ✅ Better error handling in data perturbation methods")
     logger.info("="*60)
     
     app.run(host='0.0.0.0', port=port)
