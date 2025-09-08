@@ -7,6 +7,9 @@ import requests
 import datetime
 import logging
 from dotenv import load_dotenv
+from typing import Dict, List, Tuple, Optional, Any
+from dataclasses import dataclass
+from enum import Enum
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -20,7 +23,692 @@ METEOBLUE_API_KEY = os.getenv("METEOBLUE_API_KEY")
 if not METEOBLUE_API_KEY:
     logger.warning("Missing METEOBLUE_API_KEY environment variable. Set this in your .env file.")
 
-# Helper Functions
+# ================================================================
+# GHANA DATA-DRIVEN RISK ENGINE
+# ================================================================
+
+class GhanaZone(Enum):
+    """Ghana agricultural zones based on coordinates"""
+    NORTHERN = "northern"
+    UPPER_EAST = "upper_east" 
+    UPPER_WEST = "upper_west"
+    BRONG_AHAFO = "brong_ahafo"
+    ASHANTI = "ashanti"
+    EASTERN = "eastern"
+    VOLTA = "volta"
+    GREATER_ACCRA = "greater_accra"
+    CENTRAL = "central"
+    WESTERN = "western"
+
+class GhanaDataDrivenRiskEngine:
+    """Pure data-driven risk computation engine for Ghana agriculture"""
+    
+    # GPS-based zone mapping for Ghana (connects to your soil/weather data)
+    GHANA_ZONES = {
+        GhanaZone.NORTHERN: {
+            'lat_range': (9.5, 11.0), 'lon_range': (-1.0, 0.5),
+            'rainfall_factor': 0.6, 'temp_factor': 1.3, 'drought_risk': 1.4
+        },
+        GhanaZone.UPPER_EAST: {
+            'lat_range': (10.0, 11.2), 'lon_range': (-1.5, 0.0),
+            'rainfall_factor': 0.7, 'temp_factor': 1.2, 'drought_risk': 1.3
+        },
+        GhanaZone.UPPER_WEST: {
+            'lat_range': (9.7, 11.0), 'lon_range': (-3.0, -1.5),
+            'rainfall_factor': 0.8, 'temp_factor': 1.1, 'drought_risk': 1.2
+        },
+        GhanaZone.BRONG_AHAFO: {
+            'lat_range': (7.0, 9.5), 'lon_range': (-3.0, -1.0),
+            'rainfall_factor': 1.0, 'temp_factor': 1.0, 'drought_risk': 1.0
+        },
+        GhanaZone.ASHANTI: {
+            'lat_range': (6.0, 8.0), 'lon_range': (-2.5, -0.5),
+            'rainfall_factor': 1.1, 'temp_factor': 0.9, 'drought_risk': 0.8
+        },
+        GhanaZone.EASTERN: {
+            'lat_range': (5.5, 7.5), 'lon_range': (-1.0, 0.5),
+            'rainfall_factor': 1.2, 'temp_factor': 0.9, 'drought_risk': 0.7
+        },
+        GhanaZone.VOLTA: {
+            'lat_range': (5.5, 8.5), 'lon_range': (0.0, 1.5),
+            'rainfall_factor': 1.1, 'temp_factor': 0.9, 'drought_risk': 0.8
+        },
+        GhanaZone.GREATER_ACCRA: {
+            'lat_range': (5.2, 6.2), 'lon_range': (-0.5, 0.5),
+            'rainfall_factor': 0.9, 'temp_factor': 1.0, 'drought_risk': 1.1
+        },
+        GhanaZone.CENTRAL: {
+            'lat_range': (4.8, 6.0), 'lon_range': (-2.0, -0.5),
+            'rainfall_factor': 1.0, 'temp_factor': 0.9, 'drought_risk': 0.9
+        },
+        GhanaZone.WESTERN: {
+            'lat_range': (4.5, 6.5), 'lon_range': (-3.5, -2.0),
+            'rainfall_factor': 1.3, 'temp_factor': 0.8, 'drought_risk': 0.6
+        }
+    }
+    
+    # Ghana crop parameters (research-based, no recommendations)
+    CROP_PARAMETERS = {
+        'maize': {
+            'base_temp': 12.0,
+            'optimal_temp_min': 24.0, 'optimal_temp_max': 32.0,
+            'critical_temp_min': 18.0, 'critical_temp_max': 38.0,
+            'optimal_rainfall_min': 600, 'optimal_rainfall_max': 1200,
+            'drought_days_threshold': 7,
+            'flood_threshold_mm': 60,
+            'humidity_disease_threshold': 80,
+            'price_volatility_sensitivity': 0.7,
+            'storage_loss_rate': 0.15,
+            'market_exposure_factor': 0.3,
+            'risk_weights': {'market': 0.20, 'weather': 0.55, 'suitability': 0.25}
+        },
+        'rice': {
+            'base_temp': 15.0,
+            'optimal_temp_min': 26.0, 'optimal_temp_max': 34.0,
+            'critical_temp_min': 20.0, 'critical_temp_max': 40.0,
+            'optimal_rainfall_min': 1000, 'optimal_rainfall_max': 2000,
+            'drought_days_threshold': 5,
+            'flood_threshold_mm': 100,
+            'humidity_disease_threshold': 85,
+            'price_volatility_sensitivity': 0.8,
+            'storage_loss_rate': 0.12,
+            'market_exposure_factor': 0.2,
+            'risk_weights': {'market': 0.25, 'weather': 0.60, 'suitability': 0.15}
+        },
+        'soya': {
+            'base_temp': 14.0,
+            'optimal_temp_min': 25.0, 'optimal_temp_max': 30.0,
+            'critical_temp_min': 20.0, 'critical_temp_max': 35.0,
+            'optimal_rainfall_min': 500, 'optimal_rainfall_max': 800,
+            'drought_days_threshold': 10,
+            'flood_threshold_mm': 40,
+            'humidity_disease_threshold': 75,
+            'price_volatility_sensitivity': 1.2,
+            'storage_loss_rate': 0.08,
+            'market_exposure_factor': 0.7,
+            'risk_weights': {'market': 0.35, 'weather': 0.40, 'suitability': 0.25}
+        }
+    }
+    
+    def __init__(self, latitude: float, longitude: float):
+        """Initialize with GPS coordinates"""
+        self.latitude = latitude
+        self.longitude = longitude
+        self.ghana_zone = self._map_coordinates_to_zone(latitude, longitude)
+        self.zone_factors = self.GHANA_ZONES[self.ghana_zone]
+        
+        logger.info(f"GPS ({latitude}, {longitude}) mapped to {self.ghana_zone.value}")
+    
+    def _map_coordinates_to_zone(self, lat: float, lon: float) -> GhanaZone:
+        """Map GPS coordinates to Ghana agricultural zone"""
+        
+        # Validate coordinates are within Ghana bounds
+        if not (4.0 <= lat <= 11.5 and -3.5 <= lon <= 1.5):
+            logger.warning(f"Coordinates ({lat}, {lon}) outside Ghana bounds")
+            return GhanaZone.ASHANTI  # Default fallback
+        
+        # Find matching zone
+        for zone, bounds in self.GHANA_ZONES.items():
+            lat_min, lat_max = bounds['lat_range']
+            lon_min, lon_max = bounds['lon_range']
+            
+            if lat_min <= lat <= lat_max and lon_min <= lon <= lon_max:
+                return zone
+        
+        # Fallback: find closest zone by distance
+        min_distance = float('inf')
+        closest_zone = GhanaZone.ASHANTI
+        
+        for zone, bounds in self.GHANA_ZONES.items():
+            lat_center = sum(bounds['lat_range']) / 2
+            lon_center = sum(bounds['lon_range']) / 2
+            distance = ((lat - lat_center)**2 + (lon - lon_center)**2)**0.5
+            
+            if distance < min_distance:
+                min_distance = distance
+                closest_zone = zone
+        
+        return closest_zone
+    
+    def compute_risk_scores(self, price_data: pd.DataFrame, weather_data: pd.DataFrame,
+                          suitability_data: Dict[str, float], seasonal_data: List[Dict],
+                          crops: List[str] = None) -> Dict[str, Any]:
+        """Compute pure risk scores from data sources"""
+        
+        if crops is None:
+            crops = ['maize', 'rice', 'soya']
+        
+        # Validate available crops
+        valid_crops = [c for c in crops if c in self.CROP_PARAMETERS]
+        if not valid_crops:
+            valid_crops = ['maize']  # Fallback
+        
+        crop_risk_scores = {}
+        
+        for crop in valid_crops:
+            try:
+                crop_params = self.CROP_PARAMETERS[crop]
+                
+                # Compute individual risk components
+                weather_risk = self._compute_weather_risk(weather_data, crop_params)
+                market_risk = self._compute_market_risk(price_data, crop, crop_params)
+                seasonal_risk = self._compute_seasonal_risk(seasonal_data, crop_params)
+                suitability_risk = self._compute_suitability_risk(suitability_data, crop)
+                
+                # Apply zone-specific adjustments
+                adjusted_weather = weather_risk * self.zone_factors['drought_risk']
+                adjusted_weather = min(max(adjusted_weather, 0.0), 1.0)
+                
+                # Compute composite risk
+                weights = crop_params['risk_weights']
+                environmental_risk = (adjusted_weather * 0.6) + (seasonal_risk * 0.4)
+                
+                composite_risk = (
+                    market_risk * weights['market'] +
+                    environmental_risk * weights['weather'] +
+                    suitability_risk * weights['suitability']
+                )
+                
+                composite_risk = max(0.0, min(1.0, composite_risk))
+                
+                # Calculate Growing Degree Days
+                gdd_accumulation = self._calculate_gdd(weather_data, crop_params)
+                
+                # Calculate stress indicators
+                stress_indicators = self._calculate_stress_indicators(weather_data, crop_params)
+                
+                crop_risk_scores[crop] = {
+                    'composite_risk_score': round(composite_risk, 4),
+                    'risk_components': {
+                        'weather_risk': round(adjusted_weather, 4),
+                        'market_risk': round(market_risk, 4),
+                        'seasonal_risk': round(seasonal_risk, 4),
+                        'suitability_risk': round(suitability_risk, 4),
+                        'environmental_risk': round(environmental_risk, 4)
+                    },
+                    'thermal_analysis': {
+                        'gdd_accumulation': round(gdd_accumulation, 2),
+                        'gdd_adequacy_score': round(self._score_gdd_adequacy(gdd_accumulation, crop_params), 4)
+                    },
+                    'stress_indicators': stress_indicators,
+                    'zone_adjustments': {
+                        'zone': self.ghana_zone.value,
+                        'rainfall_factor': self.zone_factors['rainfall_factor'],
+                        'temperature_factor': self.zone_factors['temp_factor'],
+                        'drought_risk_multiplier': self.zone_factors['drought_risk']
+                    }
+                }
+                
+            except Exception as e:
+                logger.error(f"Error computing risk for {crop}: {str(e)}")
+                crop_risk_scores[crop] = {
+                    'composite_risk_score': 0.5,
+                    'error': str(e)
+                }
+        
+        return {
+            'location_data': {
+                'coordinates': {'latitude': self.latitude, 'longitude': self.longitude},
+                'ghana_zone': self.ghana_zone.value,
+                'zone_characteristics': self.zone_factors
+            },
+            'crop_risk_analysis': crop_risk_scores,
+            'data_integration_status': self._validate_data_quality(price_data, weather_data, suitability_data, seasonal_data)
+        }
+    
+    def run_monte_carlo_analysis(self, price_data: pd.DataFrame, weather_data: pd.DataFrame,
+                                suitability_data: Dict[str, float], seasonal_data: List[Dict],
+                                crop: str, num_simulations: int = 1000) -> Dict[str, Any]:
+        """Run Monte Carlo simulation for uncertainty quantification"""
+        
+        if crop not in self.CROP_PARAMETERS:
+            return {'error': f'Crop {crop} not supported'}
+        
+        try:
+            risk_scenarios = []
+            
+            for _ in range(num_simulations):
+                # Generate stochastic variations
+                perturbed_weather = self._perturb_weather_data(weather_data)
+                perturbed_prices = self._perturb_price_data(price_data, crop)
+                perturbed_suitability = self._perturb_suitability_data(suitability_data, crop)
+                perturbed_seasonal = self._perturb_seasonal_data(seasonal_data)
+                
+                # Compute risk for this scenario
+                crop_params = self.CROP_PARAMETERS[crop]
+                
+                weather_risk = self._compute_weather_risk(perturbed_weather, crop_params)
+                market_risk = self._compute_market_risk(perturbed_prices, crop, crop_params)
+                seasonal_risk = self._compute_seasonal_risk(perturbed_seasonal, crop_params)
+                suitability_risk = perturbed_suitability
+                
+                # Apply zone adjustment
+                adjusted_weather = weather_risk * self.zone_factors['drought_risk']
+                adjusted_weather = min(max(adjusted_weather, 0.0), 1.0)
+                
+                # Composite risk
+                weights = crop_params['risk_weights']
+                environmental_risk = (adjusted_weather * 0.6) + (seasonal_risk * 0.4)
+                
+                scenario_risk = (
+                    market_risk * weights['market'] +
+                    environmental_risk * weights['weather'] +
+                    suitability_risk * weights['suitability']
+                )
+                
+                risk_scenarios.append(max(0.0, min(1.0, scenario_risk)))
+            
+            # Calculate statistics
+            risk_array = np.array(risk_scenarios)
+            
+            return {
+                'simulation_statistics': {
+                    'mean_risk': round(np.mean(risk_array), 4),
+                    'std_risk': round(np.std(risk_array), 4),
+                    'min_risk': round(np.min(risk_array), 4),
+                    'max_risk': round(np.max(risk_array), 4)
+                },
+                'risk_percentiles': {
+                    'p5': round(np.percentile(risk_array, 5), 4),
+                    'p10': round(np.percentile(risk_array, 10), 4),
+                    'p25': round(np.percentile(risk_array, 25), 4),
+                    'p50': round(np.percentile(risk_array, 50), 4),
+                    'p75': round(np.percentile(risk_array, 75), 4),
+                    'p90': round(np.percentile(risk_array, 90), 4),
+                    'p95': round(np.percentile(risk_array, 95), 4)
+                },
+                'probability_thresholds': {
+                    'prob_low_risk': round(np.mean(risk_array < 0.3), 4),
+                    'prob_moderate_risk': round(np.mean((risk_array >= 0.3) & (risk_array < 0.7)), 4),
+                    'prob_high_risk': round(np.mean(risk_array >= 0.7), 4)
+                },
+                'confidence_intervals': {
+                    'ci_90': [round(np.percentile(risk_array, 5), 4), round(np.percentile(risk_array, 95), 4)],
+                    'ci_95': [round(np.percentile(risk_array, 2.5), 4), round(np.percentile(risk_array, 97.5), 4)]
+                },
+                'simulation_metadata': {
+                    'num_simulations': num_simulations,
+                    'crop': crop,
+                    'zone': self.ghana_zone.value
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"Monte Carlo simulation failed for {crop}: {str(e)}")
+            return {'error': str(e)}
+    
+    def _compute_weather_risk(self, weather_data: pd.DataFrame, crop_params: Dict) -> float:
+        """Compute weather risk from weather data"""
+        if weather_data is None or weather_data.empty:
+            return 0.5
+        
+        try:
+            # Temperature stress calculation
+            temp_stress = 0.0
+            if 'temperature_max' in weather_data.columns and 'temperature_min' in weather_data.columns:
+                for _, row in weather_data.iterrows():
+                    temp_max = row.get('temperature_max', crop_params['optimal_temp_max'])
+                    temp_min = row.get('temperature_min', crop_params['optimal_temp_min'])
+                    
+                    # Critical temperature stress
+                    if temp_max > crop_params['critical_temp_max'] or temp_min < crop_params['critical_temp_min']:
+                        temp_stress += 1.0
+                    # Sub-optimal temperature stress
+                    elif temp_max > crop_params['optimal_temp_max'] or temp_min < crop_params['optimal_temp_min']:
+                        temp_stress += 0.4
+                
+                temp_stress = temp_stress / len(weather_data)
+            
+            # Precipitation stress calculation
+            precip_stress = 0.0
+            if 'precipitation_sum' in weather_data.columns:
+                consecutive_dry = 0
+                max_dry_spell = 0
+                flood_days = 0
+                
+                for _, row in weather_data.iterrows():
+                    precip = row.get('precipitation_sum', 0)
+                    
+                    if precip < 1:  # Dry day
+                        consecutive_dry += 1
+                        max_dry_spell = max(max_dry_spell, consecutive_dry)
+                    else:
+                        consecutive_dry = 0
+                    
+                    if precip > crop_params['flood_threshold_mm']:
+                        flood_days += 1
+                
+                drought_stress = min(max_dry_spell / crop_params['drought_days_threshold'], 1.0)
+                flood_stress = min(flood_days / len(weather_data), 1.0)
+                precip_stress = max(drought_stress, flood_stress)
+            
+            # Humidity stress calculation
+            humidity_stress = 0.0
+            if 'relativehumidity_mean' in weather_data.columns:
+                high_humidity_days = (weather_data['relativehumidity_mean'] > crop_params['humidity_disease_threshold']).sum()
+                humidity_stress = min(high_humidity_days / len(weather_data), 1.0)
+            
+            # Combine weather stresses
+            weather_risk = (temp_stress * 0.4) + (precip_stress * 0.5) + (humidity_stress * 0.1)
+            
+            return max(0.0, min(1.0, weather_risk))
+            
+        except Exception as e:
+            logger.error(f"Error computing weather risk: {str(e)}")
+            return 0.5
+    
+    def _compute_market_risk(self, price_data: pd.DataFrame, crop: str, crop_params: Dict) -> float:
+        """Compute market risk from price data"""
+        if price_data is None or price_data.empty:
+            return 0.5
+        
+        try:
+            # Find price series for crop
+            price_series = None
+            for col in price_data.columns:
+                if crop.lower() in col.lower():
+                    price_series = price_data[col].dropna()
+                    break
+            
+            if price_series is None or len(price_series) < 2:
+                return 0.5
+            
+            # Price volatility calculation
+            cv = price_series.std() / price_series.mean() if price_series.mean() > 0 else 0
+            volatility_risk = min(cv / 0.3, 1.0)  # Normalize
+            
+            # Apply crop-specific sensitivity
+            volatility_risk *= crop_params['price_volatility_sensitivity']
+            
+            # Storage loss factor
+            storage_risk = crop_params['storage_loss_rate']
+            
+            # Market exposure factor
+            exposure_risk = crop_params['market_exposure_factor']
+            
+            market_risk = (volatility_risk * 0.6) + (storage_risk * 0.2) + (exposure_risk * 0.2)
+            
+            return max(0.0, min(1.0, market_risk))
+            
+        except Exception as e:
+            logger.error(f"Error computing market risk for {crop}: {str(e)}")
+            return 0.5
+    
+    def _compute_seasonal_risk(self, seasonal_data: List[Dict], crop_params: Dict) -> float:
+        """Compute seasonal risk from forecast data"""
+        if not seasonal_data:
+            return 0.5
+        
+        try:
+            monthly_risks = []
+            
+            for month_data in seasonal_data:
+                if "precipitation" not in month_data or "temperature" not in month_data:
+                    continue
+                
+                precip = month_data.get("precipitation", {})
+                temp = month_data.get("temperature", {})
+                
+                # Extract probabilities
+                precip_below = self._safe_float(precip.get("prob_below_avg"), 0) / 100.0
+                precip_above = self._safe_float(precip.get("prob_above_avg"), 0) / 100.0
+                temp_above = self._safe_float(temp.get("prob_above_avg"), 0) / 100.0
+                
+                # Calculate monthly risk based on crop needs
+                if crop_params['optimal_rainfall_min'] > 800:  # High water need crops
+                    month_risk = precip_below * 1.5 + precip_above * 0.5
+                else:  # Moderate water need crops
+                    month_risk = precip_below * 1.2 + precip_above * 1.0
+                
+                month_risk += temp_above * 0.8  # Heat stress
+                monthly_risks.append(min(month_risk, 1.0))
+            
+            return np.mean(monthly_risks) if monthly_risks else 0.5
+            
+        except Exception as e:
+            logger.error(f"Error computing seasonal risk: {str(e)}")
+            return 0.5
+    
+    def _compute_suitability_risk(self, suitability_data: Dict[str, float], crop: str) -> float:
+        """Compute suitability risk from soil data"""
+        try:
+            base_suitability = suitability_data.get(crop, 50) / 100.0
+            
+            # Apply zone-specific adjustments
+            zone_adjustment = self.zone_factors['rainfall_factor'] * 0.3 + 0.7
+            adjusted_suitability = base_suitability * zone_adjustment
+            
+            suitability_risk = 1.0 - min(max(adjusted_suitability, 0.0), 1.0)
+            
+            return suitability_risk
+            
+        except Exception as e:
+            logger.error(f"Error computing suitability risk for {crop}: {str(e)}")
+            return 0.5
+    
+    def _calculate_gdd(self, weather_data: pd.DataFrame, crop_params: Dict) -> float:
+        """Calculate Growing Degree Days accumulation"""
+        if weather_data is None or weather_data.empty:
+            return 0.0
+        
+        try:
+            base_temp = crop_params['base_temp']
+            total_gdd = 0.0
+            
+            for _, row in weather_data.iterrows():
+                if 'temperature_max' in row and 'temperature_min' in row:
+                    avg_temp = (row['temperature_max'] + row['temperature_min']) / 2
+                    daily_gdd = max(0, avg_temp - base_temp)
+                    total_gdd += daily_gdd
+            
+            return total_gdd
+            
+        except Exception as e:
+            logger.error(f"Error calculating GDD: {str(e)}")
+            return 0.0
+    
+    def _score_gdd_adequacy(self, gdd_accumulation: float, crop_params: Dict) -> float:
+        """Score GDD adequacy (1.0 = optimal, 0.0 = very poor)"""
+        try:
+            # Expected GDD per day for different crops
+            expected_daily_gdd = {'maize': 15, 'rice': 12, 'soya': 14}
+            crop_key = None
+            
+            for crop in expected_daily_gdd:
+                if crop in str(crop_params):
+                    crop_key = crop
+                    break
+            
+            if not crop_key:
+                return 0.5
+            
+            expected_gdd = expected_daily_gdd[crop_key] * 14  # 14-day forecast
+            
+            if expected_gdd == 0:
+                return 0.5
+            
+            ratio = gdd_accumulation / expected_gdd
+            
+            # Optimal range 0.8-1.2
+            if 0.8 <= ratio <= 1.2:
+                return 1.0
+            elif ratio < 0.8:
+                return max(0.0, ratio / 0.8)
+            else:
+                return max(0.0, 1.0 - (ratio - 1.2) / 0.8)
+                
+        except Exception as e:
+            logger.error(f"Error scoring GDD adequacy: {str(e)}")
+            return 0.5
+    
+    def _calculate_stress_indicators(self, weather_data: pd.DataFrame, crop_params: Dict) -> Dict[str, float]:
+        """Calculate various stress indicators"""
+        if weather_data is None or weather_data.empty:
+            return {}
+        
+        try:
+            indicators = {}
+            
+            # Heat stress days
+            if 'temperature_max' in weather_data.columns:
+                heat_stress_days = (weather_data['temperature_max'] > crop_params['critical_temp_max']).sum()
+                indicators['heat_stress_days'] = int(heat_stress_days)
+                indicators['heat_stress_fraction'] = round(heat_stress_days / len(weather_data), 4)
+            
+            # Cold stress days
+            if 'temperature_min' in weather_data.columns:
+                cold_stress_days = (weather_data['temperature_min'] < crop_params['critical_temp_min']).sum()
+                indicators['cold_stress_days'] = int(cold_stress_days)
+                indicators['cold_stress_fraction'] = round(cold_stress_days / len(weather_data), 4)
+            
+            # Drought stress indicator
+            if 'precipitation_sum' in weather_data.columns:
+                total_precip = weather_data['precipitation_sum'].sum()
+                expected_precip = crop_params['optimal_rainfall_min'] * (len(weather_data) / 120)  # Scale to forecast period
+                indicators['precipitation_deficit_mm'] = round(max(0, expected_precip - total_precip), 2)
+                indicators['precipitation_adequacy_ratio'] = round(total_precip / expected_precip, 4) if expected_precip > 0 else 0.0
+            
+            # Humidity stress indicator  
+            if 'relativehumidity_mean' in weather_data.columns:
+                high_humidity_days = (weather_data['relativehumidity_mean'] > crop_params['humidity_disease_threshold']).sum()
+                indicators['high_humidity_days'] = int(high_humidity_days)
+                indicators['disease_pressure_risk'] = round(high_humidity_days / len(weather_data), 4)
+            
+            return indicators
+            
+        except Exception as e:
+            logger.error(f"Error calculating stress indicators: {str(e)}")
+            return {}
+    
+    def _validate_data_quality(self, price_data: pd.DataFrame, weather_data: pd.DataFrame,
+                             suitability_data: Dict, seasonal_data: List[Dict]) -> Dict[str, Any]:
+        """Validate quality of input data sources"""
+        status = {}
+        
+        # Price data validation
+        if price_data is not None and not price_data.empty:
+            status['price_data'] = {
+                'available': True,
+                'columns': list(price_data.columns),
+                'data_points': len(price_data),
+                'completeness': round(1 - price_data.isnull().sum().sum() / (len(price_data) * len(price_data.columns)), 4)
+            }
+        else:
+            status['price_data'] = {'available': False}
+        
+        # Weather data validation
+        if weather_data is not None and not weather_data.empty:
+            required_weather_cols = ['temperature_max', 'temperature_min', 'precipitation_sum']
+            available_cols = [col for col in required_weather_cols if col in weather_data.columns]
+            status['weather_data'] = {
+                'available': True,
+                'days_of_data': len(weather_data),
+                'required_columns_available': available_cols,
+                'completeness': round(1 - weather_data[available_cols].isnull().sum().sum() / (len(weather_data) * len(available_cols)), 4) if available_cols else 0
+            }
+        else:
+            status['weather_data'] = {'available': False}
+        
+        # Suitability data validation
+        if suitability_data:
+            status['suitability_data'] = {
+                'available': True,
+                'crops_available': list(suitability_data.keys()),
+                'average_suitability': round(np.mean(list(suitability_data.values())), 2)
+            }
+        else:
+            status['suitability_data'] = {'available': False}
+        
+        # Seasonal data validation
+        if seasonal_data:
+            status['seasonal_data'] = {
+                'available': True,
+                'months_of_forecast': len(seasonal_data),
+                'data_completeness': 'varies_by_month'
+            }
+        else:
+            status['seasonal_data'] = {'available': False}
+        
+        return status
+    
+    # Perturbation methods for Monte Carlo
+    def _perturb_weather_data(self, weather_data: pd.DataFrame) -> pd.DataFrame:
+        """Add stochastic perturbations to weather data"""
+        if weather_data is None or weather_data.empty:
+            return weather_data
+        
+        perturbed = weather_data.copy()
+        
+        if 'temperature_max' in perturbed.columns:
+            temp_noise = np.random.normal(0, 1.5, len(perturbed))
+            perturbed['temperature_max'] += temp_noise
+        
+        if 'temperature_min' in perturbed.columns:
+            temp_noise = np.random.normal(0, 1.5, len(perturbed))
+            perturbed['temperature_min'] += temp_noise
+        
+        if 'precipitation_sum' in perturbed.columns:
+            precip_multiplier = np.random.lognormal(0, 0.3, len(perturbed))
+            perturbed['precipitation_sum'] *= precip_multiplier
+        
+        return perturbed
+    
+    def _perturb_price_data(self, price_data: pd.DataFrame, crop: str) -> pd.DataFrame:
+        """Add stochastic perturbations to price data"""
+        if price_data is None or price_data.empty:
+            return price_data
+        
+        perturbed = price_data.copy()
+        
+        for col in perturbed.columns:
+            if crop.lower() in col.lower():
+                price_multiplier = np.random.lognormal(0, 0.15)  # 15% price volatility
+                perturbed[col] *= price_multiplier
+        
+        return perturbed
+    
+    def _perturb_suitability_data(self, suitability_data: Dict[str, float], crop: str) -> float:
+        """Add stochastic perturbations to suitability data"""
+        base_suitability = suitability_data.get(crop, 50) / 100.0
+        perturbation = np.random.normal(1.0, 0.1)  # 10% variation
+        perturbed_suitability = base_suitability * perturbation
+        return 1.0 - min(max(perturbed_suitability, 0.0), 1.0)
+    
+    def _perturb_seasonal_data(self, seasonal_data: List[Dict]) -> List[Dict]:
+        """Add stochastic perturbations to seasonal data"""
+        if not seasonal_data:
+            return seasonal_data
+        
+        perturbed = []
+        for month in seasonal_data:
+            perturbed_month = month.copy()
+            
+            # Add noise to probability values
+            if "precipitation" in perturbed_month:
+                precip = perturbed_month["precipitation"]
+                for key in ['prob_below_avg', 'prob_above_avg']:
+                    if key in precip:
+                        noise = np.random.normal(0, 5)  # ±5% probability noise
+                        perturbed_month["precipitation"][key] = max(0, min(100, precip[key] + noise))
+            
+            perturbed.append(perturbed_month)
+        
+        return perturbed
+    
+    @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        """Safely convert value to float"""
+        if value is None:
+            return default
+        try:
+            return float(value)
+        except (ValueError, TypeError):
+            return default
+
+# ================================================================
+# HELPER FUNCTIONS
+# ================================================================
+
 def safe_float(value, default=None):
     """Safely convert a value to float"""
     if value is None:
@@ -466,376 +1154,10 @@ def process_seasonal_forecast(forecast_data):
         logger.error(f"Error processing seasonal forecast data: {str(e)}")
         return []
 
-# Risk Assessment Class
-class CropRiskAssessment:
-    """Class to assess crop production risk based on weather, price, and suitability data"""
-    def __init__(self, price_data, weather_data, crop_suitability, seasonal_data=None):
-        """Initialize with required data"""
-        self.price_data = price_data
-        self.weather_data = weather_data
-        self.crop_suitability = crop_suitability
-        self.seasonal_data = seasonal_data or []
-    
-    def calculate_weather_risk(self):
-        """Calculate weather risk based on 14-day forecast"""
-        # Default risk if weather data is empty
-        if self.weather_data is None or self.weather_data.empty:
-            return 0.5
-        
-        try:
-            # Check temperature variability
-            temp_variation = 0
-            if 'temperature_max' in self.weather_data.columns and 'temperature_min' in self.weather_data.columns:
-                try:
-                    daily_range = self.weather_data['temperature_max'] - self.weather_data['temperature_min']
-                    temp_mean = daily_range.mean()
-                    temp_variation = daily_range.std() / temp_mean if temp_mean > 0 else 0
-                    # Normalize to 0-1 range (assuming std/mean > 1 is high variability)
-                    temp_variation = min(temp_variation, 1.0)
-                except Exception as e:
-                    logger.error(f"Error calculating temperature variation: {str(e)}")
-                    temp_variation = 0.5
-            
-            # Check precipitation pattern
-            precip_risk = 0.5  # Default medium risk
-            if 'precipitation_sum' in self.weather_data.columns:
-                try:
-                    # Calculate risk based on too much rain or drought
-                    total_days = len(self.weather_data)
-                    if total_days > 0:
-                        # Count dry days (< 1mm precipitation)
-                        dry_days = (self.weather_data['precipitation_sum'] < 1).sum()
-                        
-                        # Count heavy rain days (> 20mm precipitation)
-                        heavy_rain_days = (self.weather_data['precipitation_sum'] > 20).sum()
-                        
-                        # Calculate drought risk (many consecutive dry days)
-                        dry_streak = 0
-                        max_dry_streak = 0
-                        for _, row in self.weather_data.iterrows():
-                            if row['precipitation_sum'] < 1:
-                                dry_streak += 1
-                                max_dry_streak = max(max_dry_streak, dry_streak)
-                            else:
-                                dry_streak = 0
-                        
-                        # Normalize to 0-1 range
-                        drought_risk = min(max_dry_streak / 7, 1.0)  # 7+ consecutive dry days is high risk
-                        heavy_rain_risk = min(heavy_rain_days / total_days * 3, 1.0)  # If 1/3 of days have heavy rain, high risk
-                        
-                        # Combine precipitation risks
-                        precip_risk = max(drought_risk, heavy_rain_risk)
-                except Exception as e:
-                    logger.error(f"Error calculating precipitation risk: {str(e)}")
-                    precip_risk = 0.5
-            
-            # Check temperature extremes
-            temp_extreme_risk = 0.5  # Default medium risk
-            if 'temperature_max' in self.weather_data.columns and 'temperature_min' in self.weather_data.columns:
-                try:
-                    # Risk for extreme heat (> 35°C) or cold (< 0°C)
-                    extreme_heat_days = (self.weather_data['temperature_max'] > 35).sum()
-                    extreme_cold_days = (self.weather_data['temperature_min'] < 0).sum()
-                    
-                    total_days = len(self.weather_data)
-                    if total_days > 0:
-                        # Normalize to 0-1 range
-                        heat_risk = min(extreme_heat_days / total_days * 3, 1.0)  # If 1/3 of days are extremely hot, high risk
-                        cold_risk = min(extreme_cold_days / total_days * 3, 1.0)  # If 1/3 of days are extremely cold, high risk
-                        
-                        # Take the maximum of heat or cold risk
-                        temp_extreme_risk = max(heat_risk, cold_risk)
-                except Exception as e:
-                    logger.error(f"Error calculating temperature extreme risk: {str(e)}")
-                    temp_extreme_risk = 0.5
-            
-            # Combine all weather risks
-            weather_risk = (temp_variation * 0.3) + (precip_risk * 0.4) + (temp_extreme_risk * 0.3)
-            
-            # Ensure the risk is in the 0-1 range
-            return min(max(weather_risk, 0.0), 1.0)
-        
-        except Exception as e:
-            logger.error(f"Unexpected error in calculate_weather_risk: {str(e)}")
-            return 0.5  # Default medium risk on error
-    
-    def calculate_seasonal_risk(self):
-        """Calculate long-term seasonal risk based on 6-month forecast"""
-        # Default risk if seasonal data is empty
-        if not self.seasonal_data:
-            return 0.5
-        
-        try:
-            # Initialize risks
-            drought_risk = 0.0
-            flood_risk = 0.0
-            temperature_risk = 0.0
-            
-            # Track how many months we have valid data for
-            valid_months = 0
-            
-            # Process each month's data
-            for month in self.seasonal_data:
-                if "precipitation" not in month or "temperature" not in month:
-                    continue
-                
-                # Get precipitation data
-                precip = month.get("precipitation", {})
-                
-                # Handle array of values for precipitation mean anomaly
-                precip_anomaly_array = precip.get("mean_anomaly", [])
-                # Calculate average if we have values, otherwise use 0
-                precip_anomaly = sum(precip_anomaly_array) / len(precip_anomaly_array) if precip_anomaly_array else 0
-                
-                # Get probability values (these aren't arrays)
-                precip_below = safe_float(precip.get("prob_below_avg"), 0)
-                precip_above = safe_float(precip.get("prob_above_avg"), 0)
-                
-                # Get temperature data
-                temp = month.get("temperature", {})
-                
-                # Handle array of values for temperature mean anomaly
-                temp_anomaly_array = temp.get("mean_anomaly", [])
-                # Calculate average if we have values, otherwise use 0
-                temp_anomaly = sum(temp_anomaly_array) / len(temp_anomaly_array) if temp_anomaly_array else 0
-                
-                # Get probability values (these aren't arrays)
-                temp_above = safe_float(temp.get("prob_above_avg"), 0)
-                temp_below = safe_float(temp.get("prob_below_avg"), 0)
-                
-                # If no probability data is available, estimate from anomalies
-                if precip_below == 0 and precip_above == 0 and precip_anomaly_array:
-                    # If precipitation anomaly is negative, increase below-average probability
-                    avg_precip_anomaly = sum(p for p in precip_anomaly_array if p is not None) / len([p for p in precip_anomaly_array if p is not None]) if any(p is not None for p in precip_anomaly_array) else 0
-                    if avg_precip_anomaly < -5:  # Significant negative anomaly
-                        precip_below = min(abs(avg_precip_anomaly) * 2, 80)  # Scale up to max 80%
-                    elif avg_precip_anomaly > 5:  # Significant positive anomaly
-                        precip_above = min(avg_precip_anomaly * 2, 80)  # Scale up to max 80%
-                
-                if temp_below == 0 and temp_above == 0 and temp_anomaly_array:
-                    # If temperature anomaly is significant, increase probability accordingly
-                    avg_temp_anomaly = sum(t for t in temp_anomaly_array if t is not None) / len([t for t in temp_anomaly_array if t is not None]) if any(t is not None for t in temp_anomaly_array) else 0
-                    if avg_temp_anomaly < -0.5:  # Cooler than normal
-                        temp_below = min(abs(avg_temp_anomaly) * 40, 80)  # Scale up to max 80%
-                    elif avg_temp_anomaly > 0.5:  # Warmer than normal
-                        temp_above = min(avg_temp_anomaly * 40, 80)  # Scale up to max 80%
-                
-                # Calculate risks for this month
-                # Drought risk - high if precipitation below average and temperature above average
-                month_drought_risk = (precip_below / 100.0) * (temp_above / 100.0)
-                
-                # If probabilities are 0 but we have significant anomalies, use those
-                if month_drought_risk == 0 and precip_anomaly < -10 and temp_anomaly > 0.5:
-                    month_drought_risk = min(abs(precip_anomaly) / 50, 0.8) * min(temp_anomaly / 2, 0.8)
-                
-                # Flood risk - high if precipitation above average
-                month_flood_risk = precip_above / 100.0
-                
-                # If probabilities are 0 but we have significant anomalies, use those
-                if month_flood_risk == 0 and precip_anomaly > 10:
-                    month_flood_risk = min(precip_anomaly / 50, 0.8)
-                
-                # Temperature risk - extreme temperatures in either direction
-                month_temp_risk = max(temp_above, temp_below) / 100.0
-                
-                # If probabilities are 0 but we have significant anomalies, use those
-                if month_temp_risk == 0 and abs(temp_anomaly) > 0.8:
-                    month_temp_risk = min(abs(temp_anomaly) / 2, 0.8)
-                
-                # Weight risks by probability confidence
-                drought_risk += month_drought_risk
-                flood_risk += month_flood_risk
-                temperature_risk += month_temp_risk
-                
-                valid_months += 1
-            
-            # Calculate average risks if we have data
-            if valid_months > 0:
-                drought_risk /= valid_months
-                flood_risk /= valid_months
-                temperature_risk /= valid_months
-            
-            # Combine risks with more weight on drought for crops
-            seasonal_risk = (drought_risk * 0.5) + (flood_risk * 0.3) + (temperature_risk * 0.2)
-            
-            # Ensure the risk is in the 0-1 range
-            return min(max(seasonal_risk, 0.0), 1.0)
-        
-        except Exception as e:
-            logger.error(f"Unexpected error in calculate_seasonal_risk: {str(e)}")
-            return 0.5  # Default medium risk on error
-    
-    def calculate_price_volatility(self, crop):
-        """Calculate price volatility for a specific crop"""
-        # Default medium volatility
-        volatility = 0.5
-        
-        try:
-            # Check if price_data is valid
-            if self.price_data is None or self.price_data.empty:
-                logger.warning(f"Empty price data when calculating volatility for {crop}")
-                return volatility
-                
-            # Check if crop exists in price data
-            if crop not in self.price_data.columns:
-                logger.warning(f"Crop '{crop}' not found in price data")
-                return volatility
-                
-            # Get price data and handle NaN values
-            prices = self.price_data[crop].dropna()
-            
-            # If not enough data points, return medium volatility
-            if len(prices) < 2:
-                logger.warning(f"Insufficient price data for crop '{crop}'")
-                return volatility
-                
-            # Calculate coefficient of variation (CV) safely
-            mean_price = prices.mean()
-            if mean_price <= 0:
-                cv = 0.5  # Default if mean price is zero or negative
-            else:
-                cv = prices.std() / mean_price
-            
-            # Calculate recent trend safely
-            trend_volatility = 0.5  # Default medium volatility
-            
-            if len(prices) >= 12:
-                recent_prices = prices.iloc[-12:]
-            else:
-                recent_prices = prices
-            
-            if len(recent_prices) >= 2:
-                first_price = recent_prices.iloc[0]
-                last_price = recent_prices.iloc[-1]
-                
-                # Avoid division by zero
-                if first_price > 0:
-                    price_change = (last_price - first_price) / first_price
-                    trend_volatility = min(abs(price_change), 1.0)
-            
-            # Normalize CV to 0-1 range (assuming CV > 0.5 is high volatility)
-            cv_normalized = min(cv / 0.5, 1.0) if cv > 0 else 0
-            
-            # Combine measures (give more weight to recent trend)
-            volatility = (cv_normalized * 0.4) + (trend_volatility * 0.6)
-            
-            return min(max(volatility, 0.0), 1.0)
-            
-        except Exception as e:
-            logger.error(f"Error calculating price volatility for {crop}: {str(e)}")
-            return volatility  # Return medium volatility on any error
-    
-    def generate_risk_report(self):
-        """Generate comprehensive crop production risk report"""
-        # Risk assessment for each crop
-        risk_assessment = {}
-        
-        # Calculate overall weather risk (short-term)
-        try:
-            weather_risk = self.calculate_weather_risk()
-        except Exception as e:
-            logger.error(f"Failed to calculate weather risk: {str(e)}")
-            weather_risk = 0.5  # Default medium risk
-        
-        # Calculate seasonal risk (long-term)
-        try:
-            seasonal_risk = self.calculate_seasonal_risk()
-        except Exception as e:
-            logger.error(f"Failed to calculate seasonal risk: {str(e)}")
-            seasonal_risk = 0.5  # Default medium risk
-        
-        # Process each crop
-        if self.price_data is not None and not self.price_data.empty:
-            for crop in self.price_data.columns:
-                try:
-                    # Normalize crop name for matching with suitability data
-                    crop_lower = crop.lower()
-                    
-                    # Skip if crop is not in our suitability data
-                    suitability_score = 0.5  # Default medium suitability
-                    
-                    # Get suitability if available
-                    if crop_lower in self.crop_suitability:
-                        suitability_score = self.crop_suitability[crop_lower] / 100.0
-                    
-                    # Calculate price volatility for this crop
-                    price_volatility = self.calculate_price_volatility(crop)
-                    
-                    # Calculate risk components
-                    market_risk = price_volatility
-                    short_term_risk = weather_risk
-                    long_term_risk = seasonal_risk
-                    suitability_risk = 1.0 - suitability_score
-                    
-                    # Combined environmental risk (short and long term)
-                    environmental_risk = (short_term_risk * 0.4) + (long_term_risk * 0.6)
-                    
-                    # Composite risk score calculation
-                    risk_score = (
-                        market_risk * 0.3 +          # Market risk (price volatility)
-                        environmental_risk * 0.4 +   # Environmental risk (weather + seasonal)
-                        suitability_risk * 0.3       # Land suitability risk
-                    )
-                    
-                    # Ensure risk score is in 0-1 range
-                    risk_score = min(max(risk_score, 0.0), 1.0)
-                    
-                    # Risk level classification
-                    if risk_score < 0.2:
-                        risk_level = "Very Low Risk"
-                    elif risk_score < 0.4:
-                        risk_level = "Low Risk"
-                    elif risk_score < 0.6:
-                        risk_level = "Moderate Risk"
-                    elif risk_score < 0.8:
-                        risk_level = "High Risk"
-                    else:
-                        risk_level = "Very High Risk"
-                    
-                    # Determine key risk factors
-                    risk_factors = []
-                    if price_volatility >= 0.6:
-                        risk_factors.append("High price volatility")
-                    if short_term_risk >= 0.6:
-                        risk_factors.append("Unfavorable short-term weather")
-                    if long_term_risk >= 0.6:
-                        risk_factors.append("Unfavorable seasonal forecast")
-                    if suitability_risk >= 0.6:
-                        risk_factors.append("Low land suitability")
-                    
-                    if not risk_factors:
-                        if risk_score >= 0.4:
-                            risk_factors.append("Combined moderate factors")
-                        else:
-                            risk_factors.append("No significant risk factors")
-                    
-                    # Detailed risk assessment
-                    risk_assessment[crop] = {
-                        'risk_level': risk_level,
-                        'risk_score': round(risk_score, 2),
-                        'risk_factors': risk_factors,
-                        'components': {
-                            'price_volatility': round(price_volatility, 2),
-                            'short_term_weather_risk': round(short_term_risk, 2),
-                            'long_term_seasonal_risk': round(long_term_risk, 2),
-                            'suitability_score': round(suitability_score, 2)
-                        }
-                    }
-                    
-                except Exception as e:
-                    logger.error(f"Error assessing risk for crop {crop}: {str(e)}")
-                    risk_assessment[crop] = {
-                        'risk_level': "Assessment Failed",
-                        'risk_score': 0.5,
-                        'risk_factors': ["Assessment error"],
-                        'error': str(e)
-                    }
-        else:
-            logger.warning("Empty price data, cannot generate comprehensive risk report")
-        
-        return risk_assessment
+# ================================================================
+# FLASK APPLICATION
+# ================================================================
 
-# Flask Application
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
 
@@ -895,17 +1217,17 @@ def get_suitability_for_crop(crop, lat, lon):
         return 50  # Default medium suitability on error
 
 # ================================================================
-# ROOT AND HEALTH CHECK ROUTES - FIXES 404 ERRORS
+# ROOT AND HEALTH CHECK ROUTES
 # ================================================================
 
 @app.route('/', methods=['GET', 'HEAD'])
 def root():
-    """Root endpoint for health checks and API info - FIXES 404 ERRORS"""
+    """Root endpoint for health checks and API info"""
     return jsonify({
         'status': 'success',
         'service': 'AgriCheck Risk Assessment API',
-        'version': '1.0',
-        'message': 'API is running successfully',
+        'version': '2.0',
+        'message': 'Enhanced Ghana Data-Driven Risk Assessment API is running successfully',
         'available_endpoints': [
             'GET / - API health check',
             'GET /health - Dedicated health check',
@@ -928,6 +1250,13 @@ def root():
             'suitability_data_loaded': len(suitability_dfs) > 0,
             'suitability_crops': list(suitability_dfs.keys()),
             'meteoblue_api_configured': bool(METEOBLUE_API_KEY)
+        },
+        'new_features': {
+            'ghana_zone_mapping': 'GPS coordinates automatically mapped to Ghana agricultural zones',
+            'research_based_parameters': 'Crop parameters based on Ghana agricultural research',
+            'monte_carlo_simulation': 'Uncertainty quantification through Monte Carlo analysis',
+            'thermal_analysis': 'Growing Degree Days calculation and thermal stress indicators',
+            'pure_data_driven': 'Risk computation without embedded recommendations'
         }
     }), 200
 
@@ -938,8 +1267,8 @@ def health_check():
         'status': 'healthy',
         'timestamp': datetime.datetime.now().isoformat(),
         'uptime': 'running',
-        'service': 'agricheckb-risk-api',
-        'version': '1.0'
+        'service': 'agricheck-ghana-risk-api',
+        'version': '2.0'
     }), 200
 
 @app.route('/test-assess', methods=['GET'])
@@ -948,7 +1277,7 @@ def test_assess():
     try:
         return jsonify({
             'status': 'success',
-            'message': 'assess-crop-risk endpoint is configured correctly',
+            'message': 'Enhanced Ghana Risk Assessment endpoint is configured correctly',
             'endpoint_methods': ['GET', 'POST'],
             'test_urls': {
                 'get_example': 'https://agricheckb.onrender.com/assess-crop-risk?latitude=5.6&longitude=-0.2&crop_type=soybean',
@@ -959,13 +1288,15 @@ def test_assess():
                     'body': {'latitude': 5.6, 'longitude': -0.2, 'crop_type': 'soybean'}
                 }
             },
+            'ghana_zones_supported': list(GhanaZone.__members__.keys()),
+            'crops_supported': list(GhanaDataDrivenRiskEngine.CROP_PARAMETERS.keys()),
             'data_status': {
                 'price_data_available': not global_price_data.empty,
                 'price_data_crops': list(global_price_data.columns) if not global_price_data.empty else [],
                 'suitability_crops': list(suitability_dfs.keys()),
                 'meteoblue_api': 'configured' if METEOBLUE_API_KEY else 'not_configured'
             },
-            'sample_test': 'Visit /assess-crop-risk?latitude=5.6&longitude=-0.2&crop_type=soybean to test'
+            'sample_test': 'Visit /assess-crop-risk?latitude=5.6&longitude=-0.2&crop_type=soybean to test enhanced Ghana-specific risk assessment'
         }), 200
         
     except Exception as e:
@@ -1115,7 +1446,6 @@ def get_weather_forecast_endpoint():
         # Convert to dictionaries for JSON response
         daily_forecast = daily_df.to_dict(orient='records')
         
-
         # Return response
         return jsonify({
             'status': 'success',
@@ -1139,7 +1469,7 @@ def get_weather_forecast_endpoint():
 
 @app.route('/assess-crop-risk', methods=['GET', 'POST'])
 def assess_crop_risk():
-    """Endpoint to assess crop risk - ACCEPTS BOTH GET AND POST"""
+    """Enhanced endpoint for Ghana-specific crop risk assessment"""
     try:
         # Handle both GET and POST requests
         if request.method == 'GET':
@@ -1171,7 +1501,7 @@ def assess_crop_risk():
                 }), 400
                 
         elif request.method == 'POST':
-            # Handle POST requests (original logic)
+            # Handle POST requests
             try:
                 data = request.get_json(silent=True)
             except Exception as e:
@@ -1218,7 +1548,7 @@ def assess_crop_risk():
             }), 400
         
         # Log the request for debugging
-        logger.info(f"Risk assessment request: {request.method} - lat:{latitude}, lon:{longitude}, crop:{crop_type}")
+        logger.info(f"Enhanced risk assessment request: {request.method} - lat:{latitude}, lon:{longitude}, crop:{crop_type}")
         
         # Check if price data is available
         if global_price_data.empty:
@@ -1226,6 +1556,12 @@ def assess_crop_risk():
                 'status': 'error',
                 'message': 'Crop price data is not available. Please check if crop_prices.csv exists and is valid.'
             }), 500
+        
+        # Initialize GPS-based risk engine
+        risk_engine = GhanaDataDrivenRiskEngine(
+            latitude=latitude,
+            longitude=longitude
+        )
         
         # Get weather forecast data
         forecast_data = get_14day_forecast(latitude, longitude, elevation)
@@ -1235,62 +1571,28 @@ def assess_crop_risk():
         seasonal_data_response = get_seasonal_forecast(latitude, longitude, elevation)
         monthly_data = process_seasonal_forecast(seasonal_data_response)
         
-        # Get suitability data for all relevant crops
-        crop_suitability = {}
-        
-        # Determine which crops to get suitability for
-        target_crops = []
-        
-        if crop_type and crop_type.lower() != 'other':
-            # Process specific crop type
-            crop_type_lower = crop_type.lower()
-            
-            # Map common names to our suitability data names
-            if crop_type_lower == 'corn':
-                crop_type_lower = 'maize'
-            elif crop_type_lower in ['soybeans', 'soybean']:
-                crop_type_lower = 'soya'
-                
-            # Check if we have this crop in suitability data
-            if crop_type_lower in suitability_dfs:
-                target_crops.append(crop_type_lower)
-            else:
-                # Try to match with price data
-                matching_price_crops = []
-                for price_crop in global_price_data.columns:
-                    price_crop_lower = price_crop.lower()
-                    if price_crop_lower.startswith(crop_type_lower):
-                        matching_price_crops.append(price_crop_lower)
-                
-                if matching_price_crops:
-                    target_crops.extend(matching_price_crops)
-                else:
-                    target_crops.append(crop_type_lower)  # Use as is with default suitability
-        
+        # Determine target crops
+        if crop_type:
+            target_crops = [crop_type.lower()]
         elif crop:
-            # Handle individual crop specification
-            crop_key = crop
-            if crop == 'corn':
-                crop_key = 'maize'
-            elif crop in ['soybeans', 'soybean']:
-                crop_key = 'soya'
-                
-            target_crops.append(crop_key)
-        
+            target_crops = [crop.lower()]
         else:
-            # Use all crops from price data
-            for price_crop in global_price_data.columns:
-                target_crops.append(price_crop.lower())
+            target_crops = ['maize', 'rice', 'soya']
         
-        # Get suitability for all target crops
+        # Map common crop names
+        mapped_crops = []
         for target_crop in target_crops:
-            crop_key = target_crop
-            # Map to suitability data names if needed
             if target_crop == 'corn':
-                crop_key = 'maize'
+                mapped_crops.append('maize')
             elif target_crop in ['soybeans', 'soybean']:
-                crop_key = 'soya'
-                
+                mapped_crops.append('soya')
+            else:
+                mapped_crops.append(target_crop)
+        
+        # Get suitability data for target crops
+        crop_suitability = {}
+        for target_crop in mapped_crops:
+            crop_key = target_crop
             # Get suitability if we have data for this crop
             if crop_key in suitability_dfs:
                 crop_suitability[target_crop] = get_suitability_for_crop(crop_key, latitude, longitude)
@@ -1304,30 +1606,75 @@ def assess_crop_risk():
             for col in global_price_data.columns:
                 col_lower = col.lower()
                 # Match with any target crop
-                if col_lower in target_crops or any(col_lower.startswith(tc) for tc in target_crops):
+                if col_lower in mapped_crops or any(col_lower.startswith(tc) for tc in mapped_crops):
                     filtered_price_data[col] = global_price_data[col]
             
             price_data_for_risk = filtered_price_data
         else:
             price_data_for_risk = global_price_data
         
-        # Create risk assessment
-        risk_assessor = CropRiskAssessment(
+        # Compute pure risk scores from data
+        risk_computation = risk_engine.compute_risk_scores(
             price_data=price_data_for_risk,
             weather_data=weather_data,
-            crop_suitability=crop_suitability,
-            seasonal_data=monthly_data
+            suitability_data=crop_suitability,
+            seasonal_data=monthly_data,
+            crops=mapped_crops
         )
         
-        # Generate risk report
-        risk_report = risk_assessor.generate_risk_report()
+        # Optional: Add Monte Carlo analysis for uncertainty
+        monte_carlo_results = {}
+        for crop_name in mapped_crops:
+            if crop_name in risk_engine.CROP_PARAMETERS:
+                monte_carlo_results[crop_name] = risk_engine.run_monte_carlo_analysis(
+                    price_data=price_data_for_risk,
+                    weather_data=weather_data,
+                    suitability_data=crop_suitability,
+                    seasonal_data=monthly_data,
+                    crop=crop_name,
+                    num_simulations=500  # Adjust for performance
+                )
         
         # Prepare weather data for response
         daily_weather_data = weather_data.to_dict(orient='records')
         
+        # Create legacy format for frontend compatibility
+        legacy_risk_assessment = {}
+        for crop, data in risk_computation.get('crop_risk_analysis', {}).items():
+            if 'composite_risk_score' in data:
+                risk_score = data['composite_risk_score']
+                # Map risk score to legacy risk levels
+                if risk_score > 0.7:
+                    risk_level = 'High Risk'
+                elif risk_score > 0.4:
+                    risk_level = 'Moderate Risk'
+                else:
+                    risk_level = 'Low Risk'
+                
+                # Create legacy format entry
+                legacy_risk_assessment[crop.upper()] = {
+                    'risk_level': risk_level,
+                    'risk_score': round(risk_score, 2),
+                    'components': {
+                        'price_volatility': data.get('risk_components', {}).get('market_risk', 0),
+                        'short_term_weather_risk': data.get('risk_components', {}).get('weather_risk', 0),
+                        'long_term_seasonal_risk': data.get('risk_components', {}).get('seasonal_risk', 0),
+                        'suitability_score': 1.0 - data.get('risk_components', {}).get('suitability_risk', 0)
+                    },
+                    'risk_factors': [
+                        f"Ghana {data.get('zone_adjustments', {}).get('zone', 'unknown')} zone analysis",
+                        f"Composite risk score: {risk_score:.3f}",
+                        f"Weather risk (zone-adjusted): {data.get('risk_components', {}).get('weather_risk', 0):.3f}",
+                        f"Market risk: {data.get('risk_components', {}).get('market_risk', 0):.3f}"
+                    ]
+                }
+
         return jsonify({
             'status': 'success',
-            'method_used': request.method,  # Show which method was used
+            'method_used': request.method,
+            'api_version': '2.0',
+            # Legacy compatibility - existing frontend code works unchanged
+            'risk_assessment': legacy_risk_assessment,
             'location': {
                 'latitude': latitude,
                 'longitude': longitude,
@@ -1339,11 +1686,25 @@ def assess_crop_risk():
                 'daily': daily_weather_data,
                 'monthly': monthly_data
             },
-            'risk_assessment': risk_report
+            # Enhanced new data - available for future frontend improvements
+            'coordinates': {
+                'latitude': latitude,
+                'longitude': longitude,
+                'elevation': elevation,
+                'ghana_zone': risk_computation['location_data']['ghana_zone']
+            },
+            'risk_computation': risk_computation,
+            'monte_carlo_analysis': monte_carlo_results,
+            'data_sources_used': {
+                'price_data': not price_data_for_risk.empty,
+                'weather_data': not weather_data.empty,
+                'suitability_data': bool(crop_suitability),
+                'seasonal_data': bool(monthly_data)
+            }
         }), 200
     
     except Exception as e:
-        logger.error(f"Error in assess_crop_risk: {str(e)}")
+        logger.error(f"Error in enhanced assess_crop_risk: {str(e)}")
         return jsonify({
             'status': 'error',
             'message': f'Server error: {str(e)}'
@@ -1456,7 +1817,7 @@ if __name__ == '__main__':
     
     # Log startup information
     logger.info("="*60)
-    logger.info("🚀 Starting AgriCheck Risk Assessment API")
+    logger.info("🚀 Starting Enhanced AgriCheck Ghana Risk Assessment API")
     logger.info("="*60)
     logger.info(f"🌐 Port: {port}")
     logger.info(f"📊 Price data loaded: {not global_price_data.empty}")
@@ -1464,15 +1825,23 @@ if __name__ == '__main__':
         logger.info(f"📈 Available crops: {list(global_price_data.columns)}")
     logger.info(f"🌱 Suitability data loaded: {len(suitability_dfs)} crops")
     logger.info(f"🌤️  Meteoblue API: {'✅ Configured' if METEOBLUE_API_KEY else '❌ Not configured'}")
+    logger.info(f"🇬🇭 Ghana zones supported: {len(GhanaZone.__members__)} zones")
+    logger.info(f"🌾 Crop parameters loaded: {list(GhanaDataDrivenRiskEngine.CROP_PARAMETERS.keys())}")
     logger.info("📡 Available endpoints:")
     logger.info("   GET  / - Root endpoint (health check)")
     logger.info("   GET  /health - Dedicated health check")
     logger.info("   GET  /test-assess - Test assess-crop-risk endpoint")
-    logger.info("   GET  /assess-crop-risk - Risk assessment (GET method)")
-    logger.info("   POST /assess-crop-risk - Risk assessment (POST method)")
+    logger.info("   GET  /assess-crop-risk - Enhanced Ghana risk assessment (GET method)")
+    logger.info("   POST /assess-crop-risk - Enhanced Ghana risk assessment (POST method)")
     logger.info("   GET  /suitability - Crop suitability data")
     logger.info("   GET  /weather-forecast - Weather forecast data")
     logger.info("   GET  /test-seasonal - Test seasonal forecast")
+    logger.info("🔬 Enhanced Features:")
+    logger.info("   ✅ GPS-based Ghana zone mapping")
+    logger.info("   ✅ Research-based crop parameters")
+    logger.info("   ✅ Monte Carlo uncertainty analysis")
+    logger.info("   ✅ Growing Degree Days calculation")
+    logger.info("   ✅ Pure data-driven risk computation")
     logger.info("="*60)
     
     app.run(host='0.0.0.0', port=port)
