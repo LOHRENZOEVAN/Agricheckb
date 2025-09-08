@@ -544,10 +544,21 @@ class GhanaDataDrivenRiskEngine:
     def _calculate_stress_indicators(self, weather_data: pd.DataFrame, crop_params: Dict) -> Dict[str, float]:
         """Calculate various stress indicators"""
         if weather_data is None or weather_data.empty:
-            return {}
+            logger.warning("No weather data available for stress indicators")
+            return {
+                'heat_stress_days': 0,
+                'heat_stress_fraction': 0.0,
+                'cold_stress_days': 0,
+                'cold_stress_fraction': 0.0,
+                'precipitation_deficit_mm': 0.0,
+                'precipitation_adequacy_ratio': 0.5,
+                'high_humidity_days': 0,
+                'disease_pressure_risk': 0.0,
+                'data_available': False
+            }
         
         try:
-            indicators = {}
+            indicators = {'data_available': True}
             
             # Heat stress days
             if 'temperature_max' in weather_data.columns:
@@ -578,7 +589,7 @@ class GhanaDataDrivenRiskEngine:
             
         except Exception as e:
             logger.error(f"Error calculating stress indicators: {str(e)}")
-            return {}
+            return {'data_available': False, 'error': str(e)}
     
     def _validate_data_quality(self, price_data: pd.DataFrame, weather_data: pd.DataFrame,
                              suitability_data: Dict, seasonal_data: List[Dict]) -> Dict[str, Any]:
@@ -1199,19 +1210,55 @@ except Exception as e:
     logger.error(f"Failed to load price data: {str(e)}")
 
 def get_suitability_for_crop(crop, lat, lon):
-    """Helper function to get suitability value for a specific crop at given coordinates"""
+    """Helper function to get suitability value for a specific crop at given coordinates with robust validation"""
     try:
         if crop not in suitability_dfs or suitability_dfs[crop].empty:
             logger.warning(f"Crop '{crop}' not in suitability data, using default value")
             return 50  # Default medium suitability
         
-        df = suitability_dfs[crop]
+        df = suitability_dfs[crop].copy()  # Make a copy to avoid modifying original
+        
+        # Validate input coordinates
+        if not (-90 <= lat <= 90) or not (-180 <= lon <= 180):
+            logger.warning(f"Invalid coordinates: lat={lat}, lon={lon}, using default suitability")
+            return 50
+        
+        # Calculate distances to all points
         df['distance'] = ((df['latitude'] - lat) ** 2 + (df['longitude'] - lon) ** 2)
-        if df.empty:
-            return 50  # Default medium suitability if df is empty
-            
-        nearest = df.loc[df['distance'].idxmin()]
-        return int(nearest['suitability'])
+        
+        if df.empty or df['distance'].isna().all():
+            logger.warning(f"No valid distance calculations for {crop}, using default")
+            return 50  # Default medium suitability if df is empty or all distances are NaN
+        
+        # Find nearest point
+        min_distance_idx = df['distance'].idxmin()
+        nearest = df.loc[min_distance_idx]
+        
+        # Validate suitability value
+        suitability_value = nearest['suitability']
+        
+        # Handle various invalid value types
+        if pd.isna(suitability_value) or suitability_value is None:
+            logger.warning(f"NaN suitability value for {crop} at nearest point, using default")
+            return 50
+        
+        try:
+            suitability_value = float(suitability_value)
+        except (ValueError, TypeError):
+            logger.warning(f"Invalid suitability value type for {crop}: {type(suitability_value)}, using default")
+            return 50
+        
+        # Ensure suitability is in valid range
+        if suitability_value <= 0 or suitability_value > 100:
+            logger.warning(f"Invalid suitability value {suitability_value} for {crop}, using default")
+            return 50
+        
+        # Log successful retrieval for debugging
+        distance_km = (nearest['distance'] ** 0.5) * 111  # Rough conversion to km
+        logger.debug(f"Found suitability {suitability_value} for {crop} at distance {distance_km:.1f}km")
+        
+        return int(round(suitability_value))
+        
     except Exception as e:
         logger.error(f"Error getting suitability for crop {crop}: {str(e)}")
         return 50  # Default medium suitability on error
