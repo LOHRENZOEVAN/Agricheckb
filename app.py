@@ -11,6 +11,17 @@ from typing import Dict, List, Tuple, Optional, Any
 from dataclasses import dataclass
 from enum import Enum
 
+import warnings
+warnings.filterwarnings('ignore', category=UserWarning)
+warnings.filterwarnings('ignore', category=FutureWarning)
+
+# Add version compatibility fix
+import sys
+if sys.version_info >= (3, 11):
+    import numpy
+    # Fix for numpy._core issue
+    if not hasattr(numpy, '_core'):
+        numpy._core = numpy.core
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
