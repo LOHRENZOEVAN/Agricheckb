@@ -1,0 +1,26 @@
+{
+  "maize": {
+    "mean_price": 2668.155223880597,
+    "price_volatility": 0.46148973075763716,
+    "price_trend": 2.6088880386300023e-05,
+    "recent_price": 4005.0
+  },
+  "soya": {
+    "mean_price": 3599.3809523809523,
+    "price_volatility": 0.3940330942745897,
+    "price_trend": 0.0022696553361022556,
+    "recent_price": 4828.0
+  },
+  "sorghum": {
+    "mean_price": 1550.0,
+    "price_volatility": 0.0,
+    "price_trend": -8.98483935859561e-17,
+    "recent_price": 1550.0
+  },
+  "rice": {
+    "mean_price": 6240.0,
+    "price_volatility": NaN,
+    "price_trend": 0,
+    "recent_price": 6240.0
+  }
+}

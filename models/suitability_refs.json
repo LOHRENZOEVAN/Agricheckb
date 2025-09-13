@@ -1,0 +1,5 @@
+{
+  "maize": "suitability_data_maize.csv",
+  "rice": "suitability_data_rice.csv",
+  "soya": "suitability_data_soya.csv"
+}

@@ -24,6 +24,81 @@ if not METEOBLUE_API_KEY:
     logger.warning("Missing METEOBLUE_API_KEY environment variable. Set this in your .env file.")
 
 # ================================================================
+# ML MODEL INTEGRATION - NEW SECTION
+# ================================================================
+
+# Import the ML model trainer
+try:
+    from train_model import EnhancedModelTrainer  # Changed from SimpleModelTrainer
+    import joblib
+    
+    ML_MODEL_AVAILABLE = False
+    ml_trainer = None
+    
+    # Try to load the trained model at startup
+    if os.path.exists('models/crop_risk_model.pkl'):
+        try:
+            ml_trainer = EnhancedModelTrainer()  # Changed from SimpleModelTrainer
+            ml_trainer.model = joblib.load('models/crop_risk_model.pkl')
+            ml_trainer.scaler = joblib.load('models/scaler.pkl')  # Added
+            ml_trainer.imputer = joblib.load('models/imputer.pkl')  # Added
+            
+            # Load model metadata
+            if os.path.exists('models/model_metadata.json'):
+                import json
+                with open('models/model_metadata.json', 'r') as f:
+                    metadata = json.load(f)
+                    ml_trainer.feature_columns = metadata['feature_columns']
+            
+            # Load price features - Added
+            if os.path.exists('models/price_features.json'):
+                with open('models/price_features.json', 'r') as f:
+                    ml_trainer.price_data = json.load(f)
+            
+            # Load suitability references - Added
+            if os.path.exists('models/suitability_refs.json'):
+                with open('models/suitability_refs.json', 'r') as f:
+                    refs = json.load(f)
+                    ml_trainer.suitability_data = {}
+                    for crop_type, file_path in refs.items():
+                        if os.path.exists(file_path):
+                            ml_trainer.suitability_data[crop_type] = pd.read_csv(file_path)
+            
+            ML_MODEL_AVAILABLE = True
+            logger.info("✅ ML model loaded successfully from models/crop_risk_model.pkl")
+        except Exception as e:
+            logger.warning(f"Could not load ML model: {str(e)}")
+            logger.info("Run 'python train_model.py' to train the model first")
+    else:
+        logger.info("ML model not found. Train it first using: python data_loader.py && python train_model.py")
+        
+except ImportError as e:
+    logger.warning(f"Could not import ML model trainer: {str(e)}")
+    ML_MODEL_AVAILABLE = False
+    ml_trainer = None
+
+def get_ml_risk_prediction(latitude: float, longitude: float, crop: str) -> Optional[Dict]:
+    """Get risk prediction from ML model if available."""
+    if not ML_MODEL_AVAILABLE or ml_trainer is None:
+        return None
+    
+    try:
+        # Map crop names to match training data
+        crop_mapping = {
+            'corn': 'maize',
+            'soybeans': 'soya',
+            'soybean': 'soya'
+        }
+        mapped_crop = crop_mapping.get(crop.lower(), crop.lower())
+        
+        # Get prediction from ML model
+        prediction = ml_trainer.predict(latitude, longitude, mapped_crop)
+        return prediction
+    except Exception as e:
+        logger.error(f"ML prediction failed: {str(e)}")
+        return None
+
+# ================================================================
 # GHANA DATA-DRIVEN RISK ENGINE
 # ================================================================
 
@@ -217,8 +292,23 @@ class GhanaDataDrivenRiskEngine:
                 # Calculate stress indicators
                 stress_indicators = self._calculate_stress_indicators(weather_data, crop_params)
                 
+                # Add ML prediction if available
+                ml_prediction = None
+                blended_risk = composite_risk
+                
+                if ML_MODEL_AVAILABLE:
+                    ml_pred = get_ml_risk_prediction(self.latitude, self.longitude, crop)
+                    if ml_pred:
+                        ml_prediction = ml_pred
+                        # Blend ML and rule-based predictions (60% rule-based, 40% ML)
+                        ml_score = ml_pred['risk_score']
+                        blended_risk = (composite_risk * 0.6) + (ml_score * 0.4)
+                        blended_risk = max(0.0, min(1.0, blended_risk))
+                
                 crop_risk_scores[crop] = {
                     'composite_risk_score': round(composite_risk, 4),
+                    'blended_risk_score': round(blended_risk, 4) if ml_prediction else None,
+                    'ml_prediction': ml_prediction,
                     'risk_components': {
                         'weather_risk': round(adjusted_weather, 4),
                         'market_risk': round(market_risk, 4),
@@ -253,7 +343,8 @@ class GhanaDataDrivenRiskEngine:
                 'zone_characteristics': self.zone_factors
             },
             'crop_risk_analysis': crop_risk_scores,
-            'data_integration_status': self._validate_data_quality(price_data, weather_data, suitability_data, seasonal_data)
+            'data_integration_status': self._validate_data_quality(price_data, weather_data, suitability_data, seasonal_data),
+            'ml_model_status': 'available' if ML_MODEL_AVAILABLE else 'not_available'
         }
     
     def run_monte_carlo_analysis(self, price_data: pd.DataFrame, weather_data: pd.DataFrame,
@@ -1387,8 +1478,8 @@ def root():
     return jsonify({
         'status': 'success',
         'service': 'AgriCheck Risk Assessment API',
-        'version': '2.1',
-        'message': 'Enhanced Ghana Data-Driven Risk Assessment API with Fixed Meteoblue Integration',
+        'version': '2.2',
+        'message': 'Enhanced Ghana Data-Driven Risk Assessment API with ML Model Integration',
         'available_endpoints': [
             'GET / - API health check',
             'GET /health - Dedicated health check',
@@ -1410,13 +1501,14 @@ def root():
             'price_data_crops': list(global_price_data.columns) if not global_price_data.empty else [],
             'suitability_data_loaded': len(suitability_dfs) > 0,
             'suitability_crops': list(suitability_dfs.keys()),
-            'meteoblue_api_configured': bool(METEOBLUE_API_KEY)
+            'meteoblue_api_configured': bool(METEOBLUE_API_KEY),
+            'ml_model_loaded': ML_MODEL_AVAILABLE
         },
-        'bug_fixes_v2_1': {
-            'meteoblue_seasonal_data_handling': 'Fixed processing of seasonal anomaly data structure',
-            'monte_carlo_null_handling': 'Improved null value handling in Monte Carlo simulations',
-            'seasonal_risk_computation': 'Enhanced seasonal risk calculation using anomaly data',
-            'perturbation_robustness': 'Made data perturbation methods more robust to null values'
+        'ml_integration_v2_2': {
+            'model_available': ML_MODEL_AVAILABLE,
+            'model_type': 'RandomForestRegressor' if ML_MODEL_AVAILABLE else None,
+            'blending_enabled': True,
+            'blending_ratio': '60% rule-based, 40% ML' if ML_MODEL_AVAILABLE else 'N/A'
         }
     }), 200
 
@@ -1428,7 +1520,8 @@ def health_check():
         'timestamp': datetime.datetime.now().isoformat(),
         'uptime': 'running',
         'service': 'agricheck-ghana-risk-api',
-        'version': '2.1'
+        'version': '2.2',
+        'ml_model': 'loaded' if ML_MODEL_AVAILABLE else 'not_loaded'
     }), 200
 
 @app.route('/test-assess', methods=['GET'])
@@ -1437,7 +1530,7 @@ def test_assess():
     try:
         return jsonify({
             'status': 'success',
-            'message': 'Enhanced Ghana Risk Assessment endpoint with Meteoblue fixes is configured correctly',
+            'message': 'Enhanced Ghana Risk Assessment endpoint with ML Integration is configured correctly',
             'endpoint_methods': ['GET', 'POST'],
             'test_urls': {
                 'get_example': 'https://agricheckb.onrender.com/assess-crop-risk?latitude=5.6&longitude=-0.2&crop_type=soybean',
@@ -1454,12 +1547,12 @@ def test_assess():
                 'price_data_available': not global_price_data.empty,
                 'price_data_crops': list(global_price_data.columns) if not global_price_data.empty else [],
                 'suitability_crops': list(suitability_dfs.keys()),
-                'meteoblue_api': 'configured' if METEOBLUE_API_KEY else 'not_configured'
+                'meteoblue_api': 'configured' if METEOBLUE_API_KEY else 'not_configured',
+                'ml_model': 'loaded' if ML_MODEL_AVAILABLE else 'not_loaded'
             },
-            'fixes_implemented': {
-                'meteoblue_seasonal_parsing': 'Fixed to handle actual API response structure',
-                'monte_carlo_error_handling': 'Added robust null checking throughout simulation',
-                'seasonal_risk_anomaly_processing': 'Now uses anomaly data when probability data unavailable'
+            'ml_integration': {
+                'status': 'active' if ML_MODEL_AVAILABLE else 'inactive',
+                'message': 'ML model enhances risk predictions' if ML_MODEL_AVAILABLE else 'Run train_model.py to enable ML predictions'
             }
         }), 200
         
@@ -1633,7 +1726,7 @@ def get_weather_forecast_endpoint():
 
 @app.route('/assess-crop-risk', methods=['GET', 'POST'])
 def assess_crop_risk():
-    """Enhanced endpoint for Ghana-specific crop risk assessment with fixed Meteoblue integration"""
+    """Enhanced endpoint for Ghana-specific crop risk assessment with ML integration"""
     try:
         # Handle both GET and POST requests
         if request.method == 'GET':
@@ -1712,7 +1805,7 @@ def assess_crop_risk():
             }), 400
         
         # Log the request for debugging
-        logger.info(f"Enhanced risk assessment request: {request.method} - lat:{latitude}, lon:{longitude}, crop:{crop_type}")
+        logger.info(f"Risk assessment request: {request.method} - lat:{latitude}, lon:{longitude}, crop:{crop_type}")
         
         # Check if price data is available
         if global_price_data.empty:
@@ -1786,7 +1879,7 @@ def assess_crop_risk():
             crops=mapped_crops
         )
         
-        # Optional: Add Monte Carlo analysis for uncertainty (with improved error handling)
+        # Optional: Add Monte Carlo analysis for uncertainty
         monte_carlo_results = {}
         for crop_name in mapped_crops:
             if crop_name in risk_engine.CROP_PARAMETERS:
@@ -1813,7 +1906,9 @@ def assess_crop_risk():
         legacy_risk_assessment = {}
         for crop, data in risk_computation.get('crop_risk_analysis', {}).items():
             if 'composite_risk_score' in data:
-                risk_score = data['composite_risk_score']
+                # Use blended score if available, otherwise use composite score
+                risk_score = data.get('blended_risk_score', data['composite_risk_score'])
+                
                 # Map risk score to legacy risk levels
                 if risk_score > 0.7:
                     risk_level = 'High Risk'
@@ -1834,16 +1929,20 @@ def assess_crop_risk():
                     },
                     'risk_factors': [
                         f"Ghana {data.get('zone_adjustments', {}).get('zone', 'unknown')} zone analysis",
-                        f"Composite risk score: {risk_score:.3f}",
+                        f"Final risk score: {risk_score:.3f}" + (" (ML-enhanced)" if data.get('ml_prediction') else " (rule-based)"),
                         f"Weather risk (zone-adjusted): {data.get('risk_components', {}).get('weather_risk', 0):.3f}",
                         f"Market risk: {data.get('risk_components', {}).get('market_risk', 0):.3f}"
                     ]
                 }
+                
+                # Add ML info if available
+                if data.get('ml_prediction'):
+                    legacy_risk_assessment[crop.upper()]['ml_confidence'] = data['ml_prediction'].get('confidence', 0)
 
         return jsonify({
             'status': 'success',
             'method_used': request.method,
-            'api_version': '2.1',
+            'api_version': '2.2',
             # Legacy compatibility - existing frontend code works unchanged
             'risk_assessment': legacy_risk_assessment,
             'location': {
@@ -1870,12 +1969,13 @@ def assess_crop_risk():
                 'price_data': not price_data_for_risk.empty,
                 'weather_data': not weather_data.empty,
                 'suitability_data': bool(crop_suitability),
-                'seasonal_data': bool(monthly_data)
+                'seasonal_data': bool(monthly_data),
+                'ml_model': ML_MODEL_AVAILABLE
             }
         }), 200
     
     except Exception as e:
-        logger.error(f"Error in enhanced assess_crop_risk: {str(e)}")
+        logger.error(f"Error in assess_crop_risk: {str(e)}")
         return jsonify({
             'status': 'error',
             'message': f'Server error: {str(e)}'
@@ -1952,7 +2052,8 @@ def test_seasonal_forecast():
                 'status': processing_status,
                 'monthly_count': len(monthly_data),
                 'sample': monthly_data[0] if monthly_data else None
-            }
+            },
+            'ml_model_status': 'loaded' if ML_MODEL_AVAILABLE else 'not_loaded'
         }), 200
     
     except Exception as e:
@@ -1988,7 +2089,7 @@ if __name__ == '__main__':
     
     # Log startup information
     logger.info("="*60)
-    logger.info("🚀 Starting Enhanced AgriCheck Ghana Risk Assessment API v2.1")
+    logger.info("🚀 Starting Enhanced AgriCheck Ghana Risk Assessment API v2.2")
     logger.info("="*60)
     logger.info(f"🌐 Port: {port}")
     logger.info(f"📊 Price data loaded: {not global_price_data.empty}")
@@ -1996,6 +2097,7 @@ if __name__ == '__main__':
         logger.info(f"📈 Available crops: {list(global_price_data.columns)}")
     logger.info(f"🌱 Suitability data loaded: {len(suitability_dfs)} crops")
     logger.info(f"🌤️  Meteoblue API: {'✅ Configured' if METEOBLUE_API_KEY else '❌ Not configured'}")
+    logger.info(f"🤖 ML Model: {'✅ Loaded' if ML_MODEL_AVAILABLE else '❌ Not loaded (run train_model.py to train)'}")
     logger.info(f"🇬🇭 Ghana zones supported: {len(GhanaZone.__members__)} zones")
     logger.info(f"🌾 Crop parameters loaded: {list(GhanaDataDrivenRiskEngine.CROP_PARAMETERS.keys())}")
     logger.info("📡 Available endpoints:")
@@ -2007,17 +2109,21 @@ if __name__ == '__main__':
     logger.info("   GET  /suitability - Crop suitability data")
     logger.info("   GET  /weather-forecast - Weather forecast data")
     logger.info("   GET  /test-seasonal - Test seasonal forecast")
-    logger.info("🔬 Enhanced Features:")
+    logger.info("🔬 Enhanced Features v2.2:")
     logger.info("   ✅ GPS-based Ghana zone mapping")
     logger.info("   ✅ Research-based crop parameters")
     logger.info("   ✅ Monte Carlo uncertainty analysis")
     logger.info("   ✅ Growing Degree Days calculation")
     logger.info("   ✅ Pure data-driven risk computation")
-    logger.info("🐛 Bug Fixes in v2.1:")
-    logger.info("   ✅ Fixed Meteoblue seasonal data structure handling")
-    logger.info("   ✅ Improved Monte Carlo null value robustness")
-    logger.info("   ✅ Enhanced seasonal risk computation using anomaly data")
-    logger.info("   ✅ Better error handling in data perturbation methods")
+    if ML_MODEL_AVAILABLE:
+        logger.info("   ✅ ML model integration (60% rule-based, 40% ML)")
+        logger.info("   ✅ RandomForest predictions blended with rule-based engine")
+    else:
+        logger.info("   ⚠️  ML model not loaded - using rule-based engine only")
+        logger.info("   💡 To enable ML predictions:")
+        logger.info("      1. Run: python data_loader.py")
+        logger.info("      2. Run: python train_model.py")
+        logger.info("      3. Restart this app")
     logger.info("="*60)
     
     app.run(host='0.0.0.0', port=port)

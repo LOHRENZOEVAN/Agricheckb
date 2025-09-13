@@ -1,11 +1,55 @@
-# Requirements file (requirements.txt)
+# Core Flask Dependencies
+Flask==2.3.3
+Flask-CORS==4.0.0
+Werkzeug==2.3.7
 
-flask
-flask-cors
-numpy
-pandas
-scikit-learn
-xgboost
-requests
-python-dotenv
-gunicorn
+# Data Processing
+pandas==2.0.3
+numpy==1.24.3
+
+# Machine Learning
+scikit-learn==1.3.0
+joblib==1.3.2
+
+# HTTP Requests
+requests==2.31.0
+urllib3==2.0.4
+certifi==2023.7.22
+
+# Environment Variables
+python-dotenv==1.0.0
+
+# Date/Time Processing
+python-dateutil==2.8.2
+pytz==2023.3
+
+# Additional Dependencies for Production
+gunicorn==21.2.0  # Production WSGI server for deployment
+click==8.1.7  # Flask dependency
+itsdangerous==2.1.2  # Flask dependency
+Jinja2==3.1.2  # Flask templating
+MarkupSafe==2.1.3  # Jinja2 dependency
+
+# Data Science Dependencies
+scipy==1.11.2  # Required by scikit-learn
+threadpoolctl==3.2.0  # Performance optimization for scikit-learn
+six==1.16.0  # Python 2/3 compatibility
+
+# Optional but Recommended for Development
+ipython==8.14.0  # Better debugging experience
+matplotlib==3.7.2  # For data visualization during development
+seaborn==0.12.2  # Statistical data visualization
+
+# Testing (optional, remove if not needed)
+pytest==7.4.0
+pytest-flask==1.2.0
+pytest-cov==4.1.0
+
+# Code Quality (optional, remove if not needed)  
+black==23.7.0  # Code formatter
+flake8==6.1.0  # Linting
+pylint==2.17.5  # Advanced linting
+
+# Monitoring and Logging (optional but recommended for production)
+python-json-logger==2.0.7  # Structured logging
+sentry-sdk[flask]==1.29.2  # Error tracking (optional)
