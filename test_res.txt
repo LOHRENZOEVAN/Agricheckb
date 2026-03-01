@@ -1,0 +1,10 @@
+Seasonal Risk with Outliers: 0.2
+Median T Anomaly (expected ~1.1): 1.1
+Median P Anomaly (expected -11): -11.0
+Traceback (most recent call last):
+  File "C:\tmp\test_risk.py", line 70, in <module>
+    print("\u2705 TEST PASSED: Median and Clipping working correctly.")
+  File "C:\Python312\Lib\encodings\cp1252.py", line 19, in encode
+    return codecs.charmap_encode(input,self.errors,encoding_table)[0]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeEncodeError: 'charmap' codec can't encode character '\u2705' in position 0: character maps to <undefined>

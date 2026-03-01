@@ -173,6 +173,12 @@ class GhanaDataDrivenRiskEngine:
         }
     }
     
+    def _get_level(self, score: float) -> str:
+        """Categorize risk score into human-readable level"""
+        if score > 0.7: return "High Risk"
+        if score > 0.4: return "Moderate Risk"
+        return "Low Risk"
+
     # Ghana crop parameters (research-based, no recommendations)
     CROP_PARAMETERS = {
         'maize': {
@@ -281,14 +287,13 @@ class GhanaDataDrivenRiskEngine:
                 seasonal_risk = self._compute_seasonal_risk(seasonal_data, crop_params)
                 suitability_risk = self._compute_suitability_risk(suitability_data, crop)
                 
-                # Apply zone-specific adjustments
-                adjusted_weather = weather_risk * self.zone_factors['drought_risk']
-                adjusted_weather = min(max(adjusted_weather, 0.0), 1.0)
+                # Apply refined environmental risk blending (Zone-Adjusted)
+                # Environmental = (14-day Weather * 60%) + (6-month Seasonal * 40%)
+                env_base = (weather_risk * 0.6) + (seasonal_risk * 0.4)
+                environmental_risk = min(1.0, env_base * self.zone_factors['drought_risk'])
                 
                 # Compute composite risk
                 weights = crop_params['risk_weights']
-                environmental_risk = (adjusted_weather * 0.6) + (seasonal_risk * 0.4)
-                
                 composite_risk = (
                     market_risk * weights['market'] +
                     environmental_risk * weights['weather'] +
@@ -319,13 +324,14 @@ class GhanaDataDrivenRiskEngine:
                 crop_risk_scores[crop] = {
                     'composite_risk_score': round(composite_risk, 4),
                     'blended_risk_score': round(blended_risk, 4) if ml_prediction else None,
+                    'risk_level': self._get_level(blended_risk),
                     'ml_prediction': ml_prediction,
                     'risk_components': {
-                        'weather_risk': round(adjusted_weather, 4),
-                        'market_risk': round(market_risk, 4),
-                        'seasonal_risk': round(seasonal_risk, 4),
-                        'suitability_risk': round(suitability_risk, 4),
-                        'environmental_risk': round(environmental_risk, 4)
+                        'weather_short_term': round(weather_risk, 4),
+                        'market_volatility': round(market_risk, 4),
+                        'seasonal_long_term': round(seasonal_risk, 4),
+                        'suitability_deficit': round(suitability_risk, 4),
+                        'environmental_risk_adjusted': round(environmental_risk, 4)
                     },
                     'thermal_analysis': {
                         'gdd_accumulation': round(gdd_accumulation, 2),
@@ -384,14 +390,14 @@ class GhanaDataDrivenRiskEngine:
                 seasonal_risk = self._compute_seasonal_risk(perturbed_seasonal, crop_params)
                 suitability_risk = perturbed_suitability
                 
-                # Apply zone adjustment
-                adjusted_weather = weather_risk * self.zone_factors['drought_risk']
-                adjusted_weather = min(max(adjusted_weather, 0.0), 1.0)
+                # Composite risk
+                weights = crop_params['risk_weights']
+                # Apply refined environmental risk blending (Zone-Adjusted)
+                env_base = (weather_risk * 0.6) + (seasonal_risk * 0.4)
+                environmental_risk = min(1.0, env_base * self.zone_factors['drought_risk'])
                 
                 # Composite risk
                 weights = crop_params['risk_weights']
-                environmental_risk = (adjusted_weather * 0.6) + (seasonal_risk * 0.4)
-                
                 scenario_risk = (
                     market_risk * weights['market'] +
                     environmental_risk * weights['weather'] +
@@ -537,75 +543,43 @@ class GhanaDataDrivenRiskEngine:
             return 0.5
     
     def _compute_seasonal_risk(self, seasonal_data: List[Dict], crop_params: Dict) -> float:
-        """FIXED: Compute seasonal risk - handles anomaly-only data correctly"""
-        if not seasonal_data:
+        """
+        FIXED: Uses MEDIAN and CLIPPING to handle Meteoblue ensemble outliers.
+        Realistic Ghana variability: Temp ±5°C, Precip ±100mm.
+        """
+        if not seasonal_data: 
             return 0.5
         
         try:
-            monthly_risks = []
-            
-            for month_data in seasonal_data:
-                if "precipitation" not in month_data or "temperature" not in month_data:
-                    continue
+            monthly_scores = []
+            for month in seasonal_data:
+                m_risk = 0.0
                 
-                precip = month_data.get("precipitation", {})
-                temp = month_data.get("temperature", {})
-                month_risk = 0.0
-                
-                # FIXED: Use anomaly data since probability data is not available
-                temp_anomaly = temp.get("mean_anomaly", [])
-                if temp_anomaly and len(temp_anomaly) > 0:
-                    # Calculate temperature stress from anomalies
-                    valid_anomalies = [x for x in temp_anomaly if x is not None]
-                    if valid_anomalies:
-                        avg_temp_anomaly = np.mean(valid_anomalies)
-                        if avg_temp_anomaly > 2.0:  # Much warmer than normal
-                            month_risk += 0.4
-                        elif avg_temp_anomaly > 1.0:  # Moderately warmer
-                            month_risk += 0.2
-                        elif avg_temp_anomaly < -2.0:  # Much cooler than normal
-                            month_risk += 0.3
-                
-                # Process precipitation anomaly
-                precip_anomaly = precip.get("mean_anomaly", [])
-                if precip_anomaly and len(precip_anomaly) > 0:
-                    valid_anomalies = [x for x in precip_anomaly if x is not None]
-                    if valid_anomalies:
-                        avg_precip_anomaly = np.mean(valid_anomalies)
-                        
-                        # Determine crop water needs and adjust risk
-                        if crop_params['optimal_rainfall_min'] > 800:  # High water need crops (rice)
-                            if avg_precip_anomaly < -15:  # Much drier than normal
-                                month_risk += 0.6
-                            elif avg_precip_anomaly < -5:  # Somewhat drier
-                                month_risk += 0.3
-                            elif avg_precip_anomaly > 25:  # Much wetter than normal
-                                month_risk += 0.3
-                        else:  # Moderate water need crops (maize, soya)
-                            if avg_precip_anomaly < -20:  # Much drier than normal
-                                month_risk += 0.5
-                            elif avg_precip_anomaly < -10:  # Somewhat drier
-                                month_risk += 0.2
-                            elif avg_precip_anomaly > 30:  # Much wetter than normal
-                                month_risk += 0.4
-                
-                # Fallback to probability data if available (rare case)
-                if month_risk == 0.0:
-                    precip_below = self._safe_float(precip.get("prob_below_avg"), 0) / 100.0
-                    precip_above = self._safe_float(precip.get("prob_above_avg"), 0) / 100.0
-                    temp_above = self._safe_float(temp.get("prob_above_avg"), 0) / 100.0
+                # 1. Temperature Anomaly (Target: Consensus/Median)
+                t_anom = [val for val in month['temperature'].get('mean_anomaly', []) if val is not None]
+                if t_anom:
+                    # Use median to ignore 'impossible' ensemble members (+20°C etc)
+                    median_t = np.median(t_anom)
+                    # Clip to realistic tropical bounds
+                    safe_t = max(-4.0, min(4.0, median_t)) 
                     
-                    # Calculate monthly risk based on crop needs
-                    if crop_params['optimal_rainfall_min'] > 800:  # High water need crops
-                        month_risk = precip_below * 1.5 + precip_above * 0.5
-                    else:  # Moderate water need crops
-                        month_risk = precip_below * 1.2 + precip_above * 1.0
+                    if safe_t > 2.0: m_risk += 0.3  # Significant heat stress
+                    elif safe_t < -2.5: m_risk += 0.2 # Unusually cool
+
+                # 2. Precipitation Anomaly (Target: Water Deficit)
+                p_anom = [val for val in month['precipitation'].get('mean_anomaly', []) if val is not None]
+                if p_anom:
+                    median_p = np.median(p_anom)
+                    # Clip to realistic monthly variation (Ghana March-July ~100-200mm/mo)
+                    safe_p = max(-80.0, min(120.0, median_p))
                     
-                    month_risk += temp_above * 0.8  # Heat stress
+                    if safe_p < -30: m_risk += 0.5 # Serious drought risk signal
+                    elif safe_p < -10: m_risk += 0.2 # Moderate dry signal
+                    elif safe_p > 80: m_risk += 0.3  # Flash flood/oversaturation risk
                 
-                monthly_risks.append(min(month_risk, 1.0))
-            
-            return np.mean(monthly_risks) if monthly_risks else 0.5
+                monthly_scores.append(min(m_risk, 1.0))
+                
+            return np.mean(monthly_scores) if monthly_scores else 0.5
             
         except Exception as e:
             logger.error(f"Error computing seasonal risk: {str(e)}")
@@ -1442,7 +1416,7 @@ def root():
         'status': 'success',
         'service': 'AgriCheck Risk Assessment API',
         'version': '2.2-FIXED',
-        'message': 'Production-Ready Enhanced Ghana Data-Driven Risk Assessment API with Fixed Weather Integration',
+        'message': 'Production-Ready Enhanced Data-Driven Risk Assessment API with Fixed Weather Integration',
         'available_endpoints': [
             'GET / - API health check',
             'GET /health - Dedicated health check',
@@ -1893,12 +1867,7 @@ def assess_crop_risk():
                 risk_score = data.get('blended_risk_score', data['composite_risk_score'])
                 
                 # Map risk score to legacy risk levels
-                if risk_score > 0.7:
-                    risk_level = 'High Risk'
-                elif risk_score > 0.4:
-                    risk_level = 'Moderate Risk'
-                else:
-                    risk_level = 'Low Risk'
+                risk_level = risk_engine._get_level(risk_score)
                 
                 # Create legacy format entry
                 legacy_risk_assessment[crop.upper()] = {
