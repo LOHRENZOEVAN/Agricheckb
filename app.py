@@ -544,53 +544,60 @@ class GhanaDataDrivenRiskEngine:
     
     def _compute_seasonal_risk(self, seasonal_data: List[Dict], crop_params: Dict) -> float:
         """
-        FIXED: Uses MEDIAN and CLIPPING to handle Meteoblue ensemble outliers.
-        Realistic Ghana variability: Temp ±5°C, Precip ±100mm.
+        OPTIMIZED AGRI-ENGINE v2.3: 
+        Higher sensitivity for Ghana context. Median-based consensus with 
+        lower thresholds to catch smaller but significant drought/heat signals.
         """
         if not seasonal_data: 
             return 0.5
         
         try:
             monthly_scores = []
-            logger.info(f"Computing seasonal risk for {len(seasonal_data)} months")
+            logger.info(f"Computing seasonal risk (v2.3) for {len(seasonal_data)} months")
             
-            for month in seasonal_data:
+            for month_data in seasonal_data:
                 m_risk = 0.0
+                temp = month_data.get("temperature", {})
+                precip = month_data.get("precipitation", {})
                 
-                # 1. Temperature Anomaly (Target: Consensus/Median)
-                t_anom = [val for val in month['temperature'].get('mean_anomaly', []) if val is not None]
+                # 1. TEMPERATURE SENSITIVITY (Catching earlier heat stress)
+                t_anom = [float(x) for x in temp.get("mean_anomaly", []) if x is not None]
                 if t_anom:
-                    # Use median to ignore 'impossible' ensemble members (+20°C etc)
                     median_t = np.median(t_anom)
-                    # Clip to realistic tropical bounds
-                    safe_t = max(-4.0, min(4.0, median_t)) 
+                    safe_t = max(-5.0, min(5.0, median_t)) 
                     
-                    if safe_t > 2.0: m_risk += 0.3  # Significant heat stress
-                    elif safe_t < -2.5: m_risk += 0.2 # Unusually cool
+                    if safe_t > 1.2:     # Catch early heat stress (lowered from 2.0)
+                        m_risk += 0.35
+                    elif safe_t > 0.5:   # Detect slight warming
+                        m_risk += 0.15
+                    elif safe_t < -2.0:  # Unusually cool
+                        m_risk += 0.1
                     
-                    logger.debug(f"Month {month.get('month')}: Median T Anomaly {median_t:.2f} -> Safe T {safe_t:.2f} -> m_risk {m_risk:.2f}")
+                    logger.debug(f"Month {month_data.get('month')}: Median T {median_t:.2f} -> Safe T {safe_t:.2f} -> m_risk {m_risk:.2f}")
 
-                # 2. Precipitation Anomaly (Target: Water Deficit)
-                p_anom = [val for val in month['precipitation'].get('mean_anomaly', []) if val is not None]
+                # 2. PRECIPITATION SENSITIVITY (Catching smaller dry signals)
+                p_anom = [float(x) for x in precip.get("mean_anomaly", []) if x is not None]
                 if p_anom:
                     median_p = np.median(p_anom)
-                    # Clip to realistic monthly variation (Ghana March-July ~100-200mm/mo)
-                    safe_p = max(-80.0, min(120.0, median_p))
+                    safe_p = max(-100.0, min(120.0, median_p))
                     
-                    if safe_p < -30: m_risk += 0.5 # Serious drought risk signal
-                    elif safe_p < -10: m_risk += 0.2 # Moderate dry signal
-                    elif safe_p > 80: m_risk += 0.3  # Flash flood/oversaturation risk
+                    if safe_p < -10:    # Sensitivity increased from -30 to -10
+                        m_risk += 0.55  
+                    elif safe_p < -2:   # Detect near-normal but dry
+                        m_risk += 0.25 
+                    elif safe_p > 50:   # Catch flood/oversaturation risk earlier (lowered from 80)
+                        m_risk += 0.35 
                     
-                    logger.debug(f"Month {month.get('month')}: Median P Anomaly {median_p:.2f} -> Safe P {safe_p:.2f} -> m_risk {m_risk:.2f}")
+                    logger.debug(f"Month {month_data.get('month')}: Median P {median_p:.2f} -> Safe P {safe_p:.2f} -> m_risk {m_risk:.2f}")
                 
                 monthly_scores.append(min(m_risk, 1.0))
             
             final_risk = np.mean(monthly_scores) if monthly_scores else 0.5
-            logger.info(f"Final seasonal risk: {final_risk:.4f}")
+            logger.info(f"Final seasonal risk (v2.3): {final_risk:.4f}")
             return final_risk
             
         except Exception as e:
-            logger.error(f"Error computing seasonal risk: {str(e)}")
+            logger.error(f"Error computing seasonal risk v2.3: {str(e)}")
             return 0.5
     
     def _compute_suitability_risk(self, suitability_data: Dict[str, float], crop: str) -> float:
