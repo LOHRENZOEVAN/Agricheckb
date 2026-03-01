@@ -552,6 +552,8 @@ class GhanaDataDrivenRiskEngine:
         
         try:
             monthly_scores = []
+            logger.info(f"Computing seasonal risk for {len(seasonal_data)} months")
+            
             for month in seasonal_data:
                 m_risk = 0.0
                 
@@ -565,6 +567,8 @@ class GhanaDataDrivenRiskEngine:
                     
                     if safe_t > 2.0: m_risk += 0.3  # Significant heat stress
                     elif safe_t < -2.5: m_risk += 0.2 # Unusually cool
+                    
+                    logger.debug(f"Month {month.get('month')}: Median T Anomaly {median_t:.2f} -> Safe T {safe_t:.2f} -> m_risk {m_risk:.2f}")
 
                 # 2. Precipitation Anomaly (Target: Water Deficit)
                 p_anom = [val for val in month['precipitation'].get('mean_anomaly', []) if val is not None]
@@ -576,10 +580,14 @@ class GhanaDataDrivenRiskEngine:
                     if safe_p < -30: m_risk += 0.5 # Serious drought risk signal
                     elif safe_p < -10: m_risk += 0.2 # Moderate dry signal
                     elif safe_p > 80: m_risk += 0.3  # Flash flood/oversaturation risk
+                    
+                    logger.debug(f"Month {month.get('month')}: Median P Anomaly {median_p:.2f} -> Safe P {safe_p:.2f} -> m_risk {m_risk:.2f}")
                 
                 monthly_scores.append(min(m_risk, 1.0))
-                
-            return np.mean(monthly_scores) if monthly_scores else 0.5
+            
+            final_risk = np.mean(monthly_scores) if monthly_scores else 0.5
+            logger.info(f"Final seasonal risk: {final_risk:.4f}")
+            return final_risk
             
         except Exception as e:
             logger.error(f"Error computing seasonal risk: {str(e)}")
@@ -1253,10 +1261,29 @@ def process_seasonal_forecast(forecast_data):
             logger.warning("No time data found in seasonal forecast")
             return []
         
-        # FIXED: Extract anomaly data (no probability data available)
-        temp_anomalies = seasonal_info.get("temperature_meananomaly", [])
-        precip_anomalies = seasonal_info.get("precipitation_meananomaly", [])
+        # DEBUG: Log available keys
+        logger.info(f"Seasonal info keys: {list(seasonal_info.keys())}")
         
+        # FIXED: Extract anomaly data (no probability data available)
+        # Try all common Meteoblue key formats for anomalies
+        temp_anomalies = (
+            seasonal_info.get("temperature_meananomaly") or 
+            seasonal_info.get("temperature_mean_anomaly") or 
+            seasonal_info.get("temperature_anomaly") or 
+            []
+        )
+        precip_anomalies = (
+            seasonal_info.get("precipitation_meananomaly") or 
+            seasonal_info.get("precipitation_mean_anomaly") or 
+            seasonal_info.get("precipitation_anomaly") or 
+            []
+        )
+        
+        if not temp_anomalies:
+            logger.warning("No temperature anomaly data found in seasonal forecast")
+        if not precip_anomalies:
+            logger.warning("No precipitation anomaly data found in seasonal forecast")
+
         for i, month in enumerate(months):
             try:
                 # Collect anomaly values from all models for this month
@@ -1277,23 +1304,29 @@ def process_seasonal_forecast(forecast_data):
                             if model_data[i] is not None:
                                 month_precip_anomalies.append(model_data[i])
                 
-                # FIXED: Create structure with anomaly data only
+                # FIXED: Create structure with robust anomaly data
                 month_data = {
                     "month": month,
                     "temperature": {
-                        "mean_anomaly": month_temp_anomalies,
-                        "prob_above_avg": None,  # Not available
-                        "prob_below_avg": None,  # Not available
-                        "prob_normal": None      # Not available
+                        "mean_anomaly": [float(v) for v in month_temp_anomalies if v is not None],
+                        "prob_above_avg": None,
+                        "prob_below_avg": None,
+                        "prob_normal": None
                     },
                     "precipitation": {
-                        "mean_anomaly": month_precip_anomalies,
-                        "anomaly_pct": None,     # Not available
-                        "prob_above_avg": None,  # Not available
-                        "prob_below_avg": None,  # Not available
-                        "prob_normal": None      # Not available
+                        "mean_anomaly": [float(v) for v in month_precip_anomalies if v is not None],
+                        "anomaly_pct": None,
+                        "prob_above_avg": None,
+                        "prob_below_avg": None,
+                        "prob_normal": None
                     }
                 }
+                
+                # Double-check that we actually have numbers
+                t_count = len(month_data["temperature"]["mean_anomaly"])
+                p_count = len(month_data["precipitation"]["mean_anomaly"])
+                logger.info(f"Month {month}: Extracted {t_count} temp and {p_count} precip anomalies")
+                
                 monthly_data.append(month_data)
                 
             except Exception as e:
@@ -1870,20 +1903,24 @@ def assess_crop_risk():
                 risk_level = risk_engine._get_level(risk_score)
                 
                 # Create legacy format entry
+                comp = data.get('risk_components', {})
+                logger.info(f"Mapping legacy response for {crop}: components found: {list(comp.keys())}")
+                
                 legacy_risk_assessment[crop.upper()] = {
                     'risk_level': risk_level,
                     'risk_score': round(risk_score, 2),
                     'components': {
-                        'price_volatility': data.get('risk_components', {}).get('market_risk', 0),
-                        'short_term_weather_risk': data.get('risk_components', {}).get('weather_risk', 0),
-                        'long_term_seasonal_risk': data.get('risk_components', {}).get('seasonal_risk', 0),
-                        'suitability_score': 1.0 - data.get('risk_components', {}).get('suitability_risk', 0)
+                        'price_volatility': comp.get('market_volatility', 0),
+                        'short_term_weather_risk': comp.get('weather_short_term', 0),
+                        'long_term_seasonal_risk': comp.get('seasonal_long_term', 0),
+                        'suitability_score': 1.0 - comp.get('suitability_deficit', 0.5)
                     },
                     'risk_factors': [
                         f"Ghana {data.get('zone_adjustments', {}).get('zone', 'unknown')} zone analysis",
                         f"Final risk score: {risk_score:.3f}" + (" (ML-enhanced)" if data.get('ml_prediction') else " (rule-based)"),
-                        f"Weather risk (zone-adjusted): {data.get('risk_components', {}).get('weather_risk', 0):.3f}",
-                        f"Market risk: {data.get('risk_components', {}).get('market_risk', 0):.3f}"
+                        f"Weather risk (zone-adjusted): {comp.get('weather_short_term', 0):.3f}",
+                        f"Market volatility risk: {comp.get('market_volatility', 0):.3f}",
+                        f"Seasonal anomaly risk: {comp.get('seasonal_long_term', 0):.3f}"
                     ]
                 }
                 
