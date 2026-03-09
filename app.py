@@ -321,6 +321,9 @@ class GhanaDataDrivenRiskEngine:
                         blended_risk = (composite_risk * 0.6) + (ml_score * 0.4)
                         blended_risk = max(0.0, min(1.0, blended_risk))
                 
+                # DEBUG: Print components before dictionary assembly
+                print(f"DEBUG [{crop}]: Weather: {weather_risk:.4f}, Market: {market_risk:.4f}, Seasonal: {seasonal_risk:.4f}")
+                
                 crop_risk_scores[crop] = {
                     'composite_risk_score': round(composite_risk, 4),
                     'blended_risk_score': round(blended_risk, 4) if ml_prediction else None,
@@ -545,60 +548,70 @@ class GhanaDataDrivenRiskEngine:
     
     def _compute_seasonal_risk(self, seasonal_data: List[Dict], crop_params: Dict) -> float:
         """
-        OPTIMIZED AGRI-ENGINE v2.3: 
-        Higher sensitivity for Ghana context. Median-based consensus with 
-        lower thresholds to catch smaller but significant drought/heat signals.
+        OPTIMIZED AGRI-ENGINE v2.4: 
+        Uses continuous risk mapping to ensure small but significant anomalies 
+        in Ghana are captured and not zeroed out.
         """
         if not seasonal_data: 
             return 0.5
         
         try:
-            monthly_scores = []
-            logger.info(f"Computing seasonal risk (v2.3) for {len(seasonal_data)} months")
+            temp_medians = []
+            precip_medians = []
+            
+            logger.info(f"Computing seasonal risk (v2.4) for {len(seasonal_data)} months")
             
             for month_data in seasonal_data:
-                m_risk = 0.0
+                # Extract anomalies
                 temp = month_data.get("temperature", {})
                 precip = month_data.get("precipitation", {})
                 
-                # 1. TEMPERATURE SENSITIVITY (Catching earlier heat stress)
                 t_anom = [float(x) for x in temp.get("mean_anomaly", []) if x is not None]
                 if t_anom:
-                    median_t = np.median(t_anom)
-                    safe_t = max(-5.0, min(5.0, median_t)) 
-                    
-                    if safe_t > 1.2:     # Catch early heat stress (lowered from 2.0)
-                        m_risk += 0.35
-                    elif safe_t > 0.5:   # Detect slight warming
-                        m_risk += 0.15
-                    elif safe_t < -2.0:  # Unusually cool
-                        m_risk += 0.1
-                    
-                    logger.debug(f"Month {month_data.get('month')}: Median T {median_t:.2f} -> Safe T {safe_t:.2f} -> m_risk {m_risk:.2f}")
-
-                # 2. PRECIPITATION SENSITIVITY (Catching smaller dry signals)
+                    temp_medians.append(np.median(t_anom))
+                
                 p_anom = [float(x) for x in precip.get("mean_anomaly", []) if x is not None]
                 if p_anom:
-                    median_p = np.median(p_anom)
-                    safe_p = max(-100.0, min(120.0, median_p))
-                    
-                    if safe_p < -10:    # Sensitivity increased from -30 to -10
-                        m_risk += 0.55  
-                    elif safe_p < -2:   # Detect near-normal but dry
-                        m_risk += 0.25 
-                    elif safe_p > 50:   # Catch flood/oversaturation risk earlier (lowered from 80)
-                        m_risk += 0.35 
-                    
-                    logger.debug(f"Month {month_data.get('month')}: Median P {median_p:.2f} -> Safe P {safe_p:.2f} -> m_risk {m_risk:.2f}")
-                
-                monthly_scores.append(min(m_risk, 1.0))
+                    precip_medians.append(np.median(p_anom))
             
-            final_risk = np.mean(monthly_scores) if monthly_scores else 0.5
-            logger.info(f"Final seasonal risk (v2.3): {final_risk:.4f}")
-            return final_risk
+            # Calculate averages for the seasonal period
+            avg_temp_anomaly = np.mean(temp_medians) if temp_medians else 0.0
+            avg_precip_anomaly = np.mean(precip_medians) if precip_medians else 0.0
+            
+            # Continuous Risk Mapping (Ghana-Optimized)
+            # Temperature: ±1.2°C = subtle stress, ±3°C = moderate, ±5°C = high
+            temp_risk = min(abs(avg_temp_anomaly) / 5.0, 1.0)
+            
+            # Precipitation: ±10mm = subtle, ±40mm = moderate, ±80mm = critical
+            precip_risk = min(abs(avg_precip_anomaly) / 80.0, 1.0)
+            
+            # Weighted blending (30% Temp, 70% Precip for seasonal water security)
+            seasonal_risk = (temp_risk * 0.3) + (precip_risk * 0.7)
+            
+            # ADD DEBUG LOGGING AS REQUESTED BY USER
+            print(f"\n{'='*60}")
+            print(f"🌡️ SEASONAL RISK DEBUG (v2.4)")
+            print(f"{'='*60}")
+            print(f"Valid months: {len(seasonal_data)}")
+            print(f"Temp medians: {[round(m, 2) for m in temp_medians]}")
+            print(f"Precip medians: {[round(m, 2) for m in precip_medians]}")
+            print(f"Avg temp anomaly: {avg_temp_anomaly:.2f}°C")
+            print(f"Avg precip anomaly: {avg_precip_anomaly:.2f}mm")
+            print(f"Temp risk component: {temp_risk:.4f}")
+            print(f"Precip risk component: {precip_risk:.4f}")
+            print(f"✅ FINAL SEASONAL RISK: {seasonal_risk:.4f}")
+            print(f"{'='*60}\n")
+            
+            # Temporary test - Force value if it's too small (uncomment for hard test)
+            # if 0 < seasonal_risk < 0.05: 
+            #     print("DEBUG: Boosting minimal risk to 0.05 for visibility")
+            #     seasonal_risk = 0.05
+            
+            logger.info(f"Final seasonal risk (v2.4): {seasonal_risk:.4f}")
+            return seasonal_risk
             
         except Exception as e:
-            logger.error(f"Error computing seasonal risk v2.3: {str(e)}")
+            logger.error(f"Error computing seasonal risk v2.4: {str(e)}")
             return 0.5
     
     def _compute_suitability_risk(self, suitability_data: Dict[str, float], crop: str) -> float:
@@ -1902,6 +1915,15 @@ def assess_crop_risk():
         # Prepare weather data for response
         daily_weather_data = weather_data.to_dict(orient='records')
         
+        # Calculate global seasonal averages for factor explanation
+        avg_seasonal_temp = 0.0
+        avg_seasonal_precip = 0.0
+        if monthly_data:
+            t_medians = [np.median(m.get('temperature', {}).get('mean_anomaly', [0])) for m in monthly_data if m.get('temperature', {}).get('mean_anomaly')]
+            p_medians = [np.median(m.get('precipitation', {}).get('mean_anomaly', [0])) for m in monthly_data if m.get('precipitation', {}).get('mean_anomaly')]
+            avg_seasonal_temp = np.mean(t_medians) if t_medians else 0.0
+            avg_seasonal_precip = np.mean(p_medians) if p_medians else 0.0
+
         # Create legacy format for frontend compatibility
         legacy_risk_assessment = {}
         for crop, data in risk_computation.get('crop_risk_analysis', {}).items():
@@ -1914,8 +1936,40 @@ def assess_crop_risk():
                 
                 # Create legacy format entry
                 comp = data.get('risk_components', {})
-                logger.info(f"Mapping legacy response for {crop}: components found: {list(comp.keys())}")
+                print(f"DEBUG MAPPING [{crop}]: seasonal_long_term in comp: {comp.get('seasonal_long_term')}")
                 
+                # Generate descriptive risk factors
+                factors = [
+                    f"Location: Ghana {data.get('zone_adjustments', {}).get('zone', 'unknown').capitalize()} Zone",
+                    f"Overall {crop.capitalize()} Risk: {risk_level} ({risk_score:.2f})"
+                ]
+                
+                # Dynamic short-term weather explanation
+                sw_risk = comp.get('weather_short_term', 0)
+                if sw_risk > 0.7:
+                    factors.append(f"CRITICAL: High short-term weather stress detected ({sw_risk:.2f})")
+                elif sw_risk > 0.4:
+                    factors.append(f"WARNING: Moderate short-term weather volatility ({sw_risk:.2f})")
+                else:
+                    factors.append(f"Short-term weather is stable ({sw_risk:.2f})")
+                
+                # Dynamic seasonal explanation with RAW UNITS (mm and °C)
+                sl_risk = comp.get('seasonal_long_term', 0)
+                seasonal_info = f"Seasonal: {avg_seasonal_temp:+.2f}°C / {avg_seasonal_precip:+.1f}mm anomaly"
+                if sl_risk > 0.1:
+                    factors.append(f"Seasonal Outlook: {seasonal_info} - High risk detected ({sl_risk:.2f})")
+                elif sl_risk > 0:
+                    factors.append(f"Seasonal Outlook: {seasonal_info} - Subtle signals captured ({sl_risk:.2f})")
+                else:
+                    factors.append(f"Seasonal Outlook: {seasonal_info} - Near-normal conditions")
+                
+                # Market factor
+                m_risk = comp.get('market_volatility', 0)
+                if m_risk > 0.6:
+                    factors.append(f"Market: High price volatility sensitivity ({m_risk:.2f})")
+                else:
+                    factors.append(f"Market: Normal price behavior ({m_risk:.2f})")
+
                 legacy_risk_assessment[crop.upper()] = {
                     'risk_level': risk_level,
                     'risk_score': round(risk_score, 2),
@@ -1925,13 +1979,7 @@ def assess_crop_risk():
                         'long_term_seasonal_risk': comp.get('seasonal_long_term', 0),
                         'suitability_score': 1.0 - comp.get('suitability_deficit', 0.5)
                     },
-                    'risk_factors': [
-                        f"Ghana {data.get('zone_adjustments', {}).get('zone', 'unknown')} zone analysis",
-                        f"Final risk score: {risk_score:.3f}" + (" (ML-enhanced)" if data.get('ml_prediction') else " (rule-based)"),
-                        f"Weather risk (zone-adjusted): {comp.get('weather_short_term', 0):.3f}",
-                        f"Market volatility risk: {comp.get('market_volatility', 0):.3f}",
-                        f"Seasonal anomaly risk: {comp.get('seasonal_long_term', 0):.3f}"
-                    ]
+                    'risk_factors': factors
                 }
                 
                 # Add ML info if available
