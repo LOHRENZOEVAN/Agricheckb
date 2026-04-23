@@ -262,10 +262,68 @@ class GhanaDataDrivenRiskEngine:
         
         return closest_zone
     
+    def _get_growth_stage(self, crop: str, planting_date: str) -> Dict[str, Any]:
+        """
+        Estimate growth stage and sensitivity based on planting date.
+        Uses research-based DAP (Days After Planting) for Ghana.
+        """
+        try:
+            if not planting_date:
+                return {'stage': 'Unknown', 'dap': 0, 'multiplier': 1.0}
+                
+            from datetime import datetime
+            p_date = datetime.fromisoformat(planting_date.replace('Z', '+00:00'))
+            now = datetime.now(p_date.tzinfo)
+            dap = (now - p_date).days
+            
+            # Crop-specific stages
+            if crop.lower() == 'maize':
+                if dap < 10:  stage = "Emergence"
+                elif dap < 60: stage = "Vegetative"
+                elif dap < 90: stage = "Flowering/Tasseling"
+                elif dap < 120: stage = "Maturation"
+                else: stage = "Post-Harvest"
+            elif crop.lower() == 'rice':
+                if dap < 15:  stage = "Emergence"
+                elif dap < 65: stage = "Vegetative"
+                elif dap < 100: stage = "Reproductive"
+                else: stage = "Ripening"
+            else: # Soya/Default
+                if dap < 10:  stage = "Emergence"
+                elif dap < 50: stage = "Vegetative"
+                elif dap < 80: stage = "Flowering"
+                else: stage = "Pod Filling/Maturity"
+                
+            multiplier = self._get_stage_multiplier(stage)
+            
+            return {
+                'stage': stage,
+                'days_after_planting': dap,
+                'sensitivity_multiplier': multiplier
+            }
+        except Exception as e:
+            logger.error(f"Error calculating growth stage: {str(e)}")
+            return {'stage': 'Unknown', 'dap': 0, 'multiplier': 1.0}
+
+    def _get_stage_multiplier(self, stage: str) -> float:
+        """Get risk sensitivity multiplier for a specific stage"""
+        multipliers = {
+            "Emergence": 1.2,           # Delicate
+            "Vegetative": 0.8,          # Resilient
+            "Flowering/Tasseling": 1.6, # CRITICAL
+            "Reproductive": 1.5,        # CRITICAL
+            "Flowering": 1.5,           # CRITICAL
+            "Maturation": 1.1,          # Moderate
+            "Ripening": 1.1,            # Moderate
+            "Pod Filling/Maturity": 1.2, # Moderate
+            "Post-Harvest": 0.5         # Low risk
+        }
+        return multipliers.get(stage, 1.0)
+    
     def compute_risk_scores(self, price_data: pd.DataFrame, weather_data: pd.DataFrame,
                           suitability_data: Dict[str, float], seasonal_data: List[Dict],
-                          crops: List[str] = None) -> Dict[str, Any]:
-        """Compute pure risk scores from data sources"""
+                          crops: List[str] = None, planting_date: str = None) -> Dict[str, Any]:
+        """Compute pure risk scores from data sources with stage-specific sensitivity"""
         
         if crops is None:
             crops = ['maize', 'rice', 'soya']
@@ -281,8 +339,12 @@ class GhanaDataDrivenRiskEngine:
             try:
                 crop_params = self.CROP_PARAMETERS[crop]
                 
+                # Identify growth stage and multiplier
+                stage_info = self._get_growth_stage(crop, planting_date)
+                stage_multiplier = stage_info.get('sensitivity_multiplier', 1.0)
+                
                 # Compute individual risk components
-                weather_risk = self._compute_weather_risk(weather_data, crop_params)
+                weather_risk = self._compute_weather_risk(weather_data, crop_params, stage_multiplier)
                 market_risk = self._compute_market_risk(price_data, crop, crop_params)
                 seasonal_risk = self._compute_seasonal_risk(seasonal_data, crop_params)
                 suitability_risk = self._compute_suitability_risk(suitability_data, crop)
@@ -369,8 +431,8 @@ class GhanaDataDrivenRiskEngine:
     
     def run_monte_carlo_analysis(self, price_data: pd.DataFrame, weather_data: pd.DataFrame,
                                 suitability_data: Dict[str, float], seasonal_data: List[Dict],
-                                crop: str, num_simulations: int = 1000) -> Dict[str, Any]:
-        """Run Monte Carlo simulation for uncertainty quantification"""
+                                crop: str, num_simulations: int = 1000, planting_date: str = None) -> Dict[str, Any]:
+        """Run Monte Carlo simulation for uncertainty quantification with growth stage awareness"""
         
         if crop not in self.CROP_PARAMETERS:
             return {'error': f'Crop {crop} not supported'}
@@ -378,6 +440,10 @@ class GhanaDataDrivenRiskEngine:
         try:
             crop_params = self.CROP_PARAMETERS[crop]
             weights = crop_params['risk_weights']
+            
+            # Identify growth stage and multiplier once for the simulation
+            stage_info = self._get_growth_stage(crop, planting_date)
+            stage_multiplier = stage_info.get('sensitivity_multiplier', 1.0)
             
             # OPTIMIZATION: Calculate seasonal risk once outside the loop as it doesn't change
             # between Monte Carlo runs - significantly improves performance for 500+ iterations
@@ -392,7 +458,7 @@ class GhanaDataDrivenRiskEngine:
                 perturbed_suitability = self._perturb_suitability_data(suitability_data, crop)
                 
                 # Compute risk for this scenario using pre-calculated seasonal risk
-                weather_risk = self._compute_weather_risk(perturbed_weather, crop_params)
+                weather_risk = self._compute_weather_risk(perturbed_weather, crop_params, stage_multiplier)
                 market_risk = self._compute_market_risk(perturbed_prices, crop, crop_params)
                 suitability_risk = perturbed_suitability
                 
@@ -449,8 +515,8 @@ class GhanaDataDrivenRiskEngine:
             logger.error(f"Monte Carlo simulation failed for {crop}: {str(e)}")
             return {'error': str(e)}
     
-    def _compute_weather_risk(self, weather_data: pd.DataFrame, crop_params: Dict) -> float:
-        """Compute weather risk from weather data"""
+    def _compute_weather_risk(self, weather_data: pd.DataFrame, crop_params: Dict, stage_multiplier: float = 1.0) -> float:
+        """Compute weather risk from weather data with growth stage sensitivity"""
         if weather_data is None or weather_data.empty:
             return 0.5
         
@@ -474,27 +540,22 @@ class GhanaDataDrivenRiskEngine:
             # Precipitation stress calculation
             precip_stress = 0.0
             if 'precipitation_sum' in weather_data.columns:
-                consecutive_dry = 0
-                max_dry_spell = 0
-                flood_days = 0
+                drought_days = (weather_data['precipitation_sum'] < 1.0).sum()
                 
-                for _, row in weather_data.iterrows():
-                    precip = row.get('precipitation_sum', 0)
-                    
-                    if precip < 1:  # Dry day
-                        consecutive_dry += 1
-                        max_dry_spell = max(max_dry_spell, consecutive_dry)
-                    else:
-                        consecutive_dry = 0
-                    
-                    if precip > crop_params['flood_threshold_mm']:
-                        flood_days += 1
+                # Drought risk
+                drought_risk = 0.0
+                if drought_days > crop_params['drought_days_threshold']:
+                    drought_risk = min((drought_days - crop_params['drought_days_threshold']) / 10, 1.0)
                 
-                drought_stress = min(max_dry_spell / crop_params['drought_days_threshold'], 1.0)
-                flood_stress = min(flood_days / len(weather_data), 1.0)
-                precip_stress = max(drought_stress, flood_stress)
+                # Flood risk
+                flood_risk = 0.0
+                max_daily_precip = weather_data['precipitation_sum'].max()
+                if max_daily_precip > crop_params['flood_threshold_mm']:
+                    flood_risk = min((max_daily_precip - crop_params['flood_threshold_mm']) / 50, 1.0)
+                
+                precip_stress = max(drought_risk, flood_risk)
             
-            # Humidity stress calculation
+            # Humidity/Disease stress
             humidity_stress = 0.0
             if 'relativehumidity_mean' in weather_data.columns:
                 high_humidity_days = (weather_data['relativehumidity_mean'] > crop_params['humidity_disease_threshold']).sum()
@@ -502,6 +563,9 @@ class GhanaDataDrivenRiskEngine:
             
             # Combine weather stresses
             weather_risk = (temp_stress * 0.4) + (precip_stress * 0.5) + (humidity_stress * 0.1)
+            
+            # Apply growth stage sensitivity multiplier
+            weather_risk *= stage_multiplier
             
             return max(0.0, min(1.0, weather_risk))
             
@@ -786,6 +850,72 @@ class GhanaDataDrivenRiskEngine:
             status['seasonal_data'] = {'available': False}
         
         return status
+
+    def calculate_yield_prediction(self, crop: str, area_acres: float, 
+                                 fertilizer: Optional[bool] = None, 
+                                 seed_variety: Optional[str] = None,
+                                 suitability_score: float = 50.0,
+                                 risk_score: float = 0.5) -> Dict[str, Any]:
+        """
+        Calculate predicted yield based on area, inputs, suitability and risk.
+        Converts Acres to Hectares for standard MT/Ha calculations.
+        """
+        try:
+            # 1. Classification & Overrides
+            # Default logic: > 15 acres is commercial
+            is_commercial_by_area = area_acres > 15
+            
+            use_fertilizer = fertilizer if fertilizer is not None else is_commercial_by_area
+            variety = seed_variety.lower() if seed_variety else ("improved" if is_commercial_by_area else "local")
+            
+            # 2. Base Potential (MT/Ha) for Ghana
+            # Research-based: Maize (1.5-4.5), Rice (2.2-5.5), Soya (0.8-2.2)
+            yield_benchmarks = {
+                'maize': {'base': 1.5, 'fert_boost': 1.5, 'seed_boost': 1.5},
+                'rice':  {'base': 2.2, 'fert_boost': 1.8, 'seed_boost': 1.5},
+                'soya':  {'base': 0.8, 'fert_boost': 0.7, 'seed_boost': 0.7}
+            }
+            
+            stats = yield_benchmarks.get(crop.lower(), yield_benchmarks['maize'])
+            
+            # 3. Calculate Potential Yield (MT/Ha)
+            potential_yield_mt_ha = stats['base']
+            if use_fertilizer:
+                potential_yield_mt_ha += stats['fert_boost']
+            if variety == "improved":
+                potential_yield_mt_ha += stats['seed_boost']
+            
+            # 4. Apply Environmental Modifiers
+            # suitability_score is 0-100, risk_score is 0.0-1.0
+            suit_factor = suitability_score / 100.0
+            risk_survival_rate = 1.0 - risk_score
+            
+            actual_yield_mt_ha = potential_yield_mt_ha * suit_factor * risk_survival_rate
+            
+            # 5. Calculate Total Tonnage
+            area_ha = area_acres * 0.4047  # 1 Acre = 0.4047 Ha
+            total_yield_mt = actual_yield_mt_ha * area_ha
+            
+            return {
+                'predicted_yield_mt': round(total_yield_mt, 2),
+                'yield_per_ha': round(actual_yield_mt_ha, 2),
+                'potential_yield_mt_ha': round(potential_yield_mt_ha, 2),
+                'area_hectares': round(area_ha, 2),
+                'farm_classification': "Commercial" if is_commercial_by_area else "Smallholder",
+                'inputs_used': {
+                    'fertilizer': use_fertilizer,
+                    'seed_variety': variety,
+                    'is_overridden': (fertilizer is not None or seed_variety is not None)
+                },
+                'modifiers': {
+                    'suitability_factor': round(suit_factor, 2),
+                    'risk_impact_factor': round(risk_survival_rate, 2)
+                }
+            }
+        except Exception as e:
+            logger.error(f"Error in yield calculation: {str(e)}")
+            return {'error': str(e)}
+
     
     # Perturbation methods for Monte Carlo
     def _perturb_weather_data(self, weather_data: pd.DataFrame) -> pd.DataFrame:
@@ -1751,6 +1881,14 @@ def assess_crop_risk():
             field_location = request.args.get('field_location')
             crop = request.args.get('crop', '').lower()
             
+            # New yield-related parameters
+            area = request.args.get('area')
+            uses_fertilizer = request.args.get('uses_fertilizer')
+            if uses_fertilizer is not None:
+                uses_fertilizer = uses_fertilizer.lower() == 'true'
+            seed_variety = request.args.get('seed_variety')
+            planting_date = request.args.get('datePlanted')
+            
             # Validate required parameters
             if latitude is None or longitude is None:
                 return jsonify({
@@ -1764,6 +1902,8 @@ def assess_crop_risk():
                 longitude = float(longitude)
                 if elevation is not None:
                     elevation = int(elevation)
+                if area is not None:
+                    area = float(area)
             except (ValueError, TypeError):
                 return jsonify({
                     'status': 'error',
@@ -1792,6 +1932,14 @@ def assess_crop_risk():
             field_location = data.get('field_location')
             crop = data.get('crop', '').lower()
             
+            # New yield-related parameters
+            area = data.get('area')
+            uses_fertilizer = data.get('uses_fertilizer')
+            if isinstance(uses_fertilizer, str):
+                uses_fertilizer = uses_fertilizer.lower() == 'true'
+            seed_variety = data.get('seed_variety')
+            planting_date = data.get('datePlanted')
+            
             # Validate required parameters
             if latitude is None or longitude is None:
                 return jsonify({
@@ -1804,7 +1952,10 @@ def assess_crop_risk():
                 longitude = float(longitude)
                 if elevation is not None:
                     elevation = int(elevation)
+                if area is not None:
+                    area = float(area)
             except (ValueError, TypeError):
+
                 return jsonify({
                     'status': 'error',
                     'message': 'Invalid coordinates format. Latitude and longitude must be numbers.'
@@ -1889,7 +2040,8 @@ def assess_crop_risk():
             weather_data=weather_data,
             suitability_data=crop_suitability,
             seasonal_data=monthly_data,
-            crops=mapped_crops
+            crops=mapped_crops,
+            planting_date=planting_date
         )
         
         # Optional: Add Monte Carlo analysis for uncertainty
@@ -1903,7 +2055,8 @@ def assess_crop_risk():
                         suitability_data=crop_suitability,
                         seasonal_data=monthly_data,
                         crop=crop_name,
-                        num_simulations=500  # Adjust for performance
+                        num_simulations=500,  # Adjust for performance
+                        planting_date=planting_date
                     )
                 except Exception as e:
                     logger.error(f"Monte Carlo analysis failed for {crop_name}: {str(e)}")
@@ -1924,6 +2077,9 @@ def assess_crop_risk():
             avg_seasonal_temp = np.mean(t_medians) if t_medians else 0.0
             avg_seasonal_precip = np.mean(p_medians) if p_medians else 0.0
 
+        # Prepare yield predictions if area is provided
+        yield_predictions = {}
+        
         # Create legacy format for frontend compatibility
         legacy_risk_assessment = {}
         for crop, data in risk_computation.get('crop_risk_analysis', {}).items():
@@ -1936,13 +2092,31 @@ def assess_crop_risk():
                 
                 # Create legacy format entry
                 comp = data.get('risk_components', {})
-                print(f"DEBUG MAPPING [{crop}]: seasonal_long_term in comp: {comp.get('seasonal_long_term')}")
+                
+                # ------------------------------------------------------------
+                # NEW: YIELD PREDICTION INTEGRATION
+                # ------------------------------------------------------------
+                crop_yield_data = None
+                if area is not None:
+                    suitability = crop_suitability.get(crop, 50)
+                    crop_yield_data = risk_engine.calculate_yield_prediction(
+                        crop=crop,
+                        area_acres=area,
+                        fertilizer=uses_fertilizer,
+                        seed_variety=seed_variety,
+                        suitability_score=suitability,
+                        risk_score=risk_score
+                    )
+                    yield_predictions[crop] = crop_yield_data
                 
                 # Generate descriptive risk factors
                 factors = [
                     f"Location: Ghana {data.get('zone_adjustments', {}).get('zone', 'unknown').capitalize()} Zone",
                     f"Overall {crop.capitalize()} Risk: {risk_level} ({risk_score:.2f})"
                 ]
+                
+                if crop_yield_data and 'predicted_yield_mt' in crop_yield_data:
+                    factors.append(f"Predicted Yield: {crop_yield_data['predicted_yield_mt']} MT ({crop_yield_data['farm_classification']})")
                 
                 # Dynamic short-term weather explanation
                 sw_risk = comp.get('weather_short_term', 0)
@@ -1973,6 +2147,7 @@ def assess_crop_risk():
                 legacy_risk_assessment[crop.upper()] = {
                     'risk_level': risk_level,
                     'risk_score': round(risk_score, 2),
+                    'predicted_yield': crop_yield_data if crop_yield_data else "Area not provided",
                     'components': {
                         'price_volatility': comp.get('market_volatility', 0),
                         'short_term_weather_risk': comp.get('weather_short_term', 0),
@@ -1989,20 +2164,23 @@ def assess_crop_risk():
         return jsonify({
             'status': 'success',
             'method_used': request.method,
-            'api_version': '2.2-FIXED',
+            'api_version': '2.3-YIELD',
             # Legacy compatibility - existing frontend code works unchanged
             'risk_assessment': legacy_risk_assessment,
+            'yield_predictions': yield_predictions if area else "Area parameter missing for yield prediction",
             'location': {
                 'latitude': latitude,
                 'longitude': longitude,
                 'elevation': elevation,
-                'field_location': field_location
+                'field_location': field_location,
+                'area_acres': area
             },
             'suitability_data': crop_suitability,
             'weather_forecast': {
                 'daily': daily_weather_data,
                 'monthly': monthly_data
             },
+
             # Enhanced new data - available for future frontend improvements
             'coordinates': {
                 'latitude': latitude,
