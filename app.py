@@ -403,6 +403,11 @@ class GhanaDataDrivenRiskEngine:
                         'gdd_adequacy_score': round(self._score_gdd_adequacy(gdd_accumulation, crop_params), 4)
                     },
                     'stress_indicators': stress_indicators,
+                    'growth_stage': {
+                        'stage': stage_info.get('stage', 'Unknown'),
+                        'days_after_planting': stage_info.get('days_after_planting', 0),
+                        'sensitivity_multiplier': round(stage_multiplier, 2)
+                    },
                     'zone_adjustments': {
                         'zone': self.ghana_zone.value,
                         'rainfall_factor': self.zone_factors['rainfall_factor'],
@@ -851,19 +856,31 @@ class GhanaDataDrivenRiskEngine:
         
         return status
 
-    def calculate_yield_prediction(self, crop: str, area_acres: float, 
+    def calculate_yield_prediction(self, crop: str, area_acres: Optional[float] = None, 
+                                 area_hectares: Optional[float] = None,
                                  fertilizer: Optional[bool] = None, 
                                  seed_variety: Optional[str] = None,
                                  suitability_score: float = 50.0,
                                  risk_score: float = 0.5) -> Dict[str, Any]:
         """
         Calculate predicted yield based on area, inputs, suitability and risk.
-        Converts Acres to Hectares for standard MT/Ha calculations.
+        Supports both Acres and Hectares.
         """
         try:
+            # 0. Handle area units - prioritize hectares if provided
+            if area_hectares is not None:
+                area_ha = float(area_hectares)
+                calc_area_acres = area_ha / 0.4047
+            elif area_acres is not None:
+                calc_area_acres = float(area_acres)
+                area_ha = calc_area_acres * 0.4047
+            else:
+                logger.warning("Yield calculation called without area")
+                return {'error': 'Area not provided'}
+
             # 1. Classification & Overrides
             # Default logic: > 15 acres is commercial
-            is_commercial_by_area = area_acres > 15
+            is_commercial_by_area = calc_area_acres > 15
             
             use_fertilizer = fertilizer if fertilizer is not None else is_commercial_by_area
             variety = seed_variety.lower() if seed_variety else ("improved" if is_commercial_by_area else "local")
@@ -893,7 +910,6 @@ class GhanaDataDrivenRiskEngine:
             actual_yield_mt_ha = potential_yield_mt_ha * suit_factor * risk_survival_rate
             
             # 5. Calculate Total Tonnage
-            area_ha = area_acres * 0.4047  # 1 Acre = 0.4047 Ha
             total_yield_mt = actual_yield_mt_ha * area_ha
             
             return {
@@ -1881,13 +1897,17 @@ def assess_crop_risk():
             field_location = request.args.get('field_location')
             crop = request.args.get('crop', '').lower()
             
-            # New yield-related parameters
+            # New yield-related parameters (Flexible naming)
             area = request.args.get('area')
+            area_acres = request.args.get('area_acres')
+            area_hectares = request.args.get('area_hectares')
             uses_fertilizer = request.args.get('uses_fertilizer')
             if uses_fertilizer is not None:
                 uses_fertilizer = uses_fertilizer.lower() == 'true'
             seed_variety = request.args.get('seed_variety')
             planting_date = request.args.get('datePlanted')
+            
+            logger.info(f"Risk assessment request: GET - lat:{latitude}, lon:{longitude}, crop:{crop}, area:{area or area_hectares or area_acres}, planted:{planting_date}")
             
             # Validate required parameters
             if latitude is None or longitude is None:
@@ -1902,8 +1922,9 @@ def assess_crop_risk():
                 longitude = float(longitude)
                 if elevation is not None:
                     elevation = int(elevation)
-                if area is not None:
-                    area = float(area)
+                if area is not None: area = float(area)
+                if area_acres is not None: area_acres = float(area_acres)
+                if area_hectares is not None: area_hectares = float(area_hectares)
             except (ValueError, TypeError):
                 return jsonify({
                     'status': 'error',
@@ -1932,13 +1953,17 @@ def assess_crop_risk():
             field_location = data.get('field_location')
             crop = data.get('crop', '').lower()
             
-            # New yield-related parameters
+            # New yield-related parameters (Flexible naming)
             area = data.get('area')
+            area_acres = data.get('area_acres')
+            area_hectares = data.get('area_hectares')
             uses_fertilizer = data.get('uses_fertilizer')
             if isinstance(uses_fertilizer, str):
                 uses_fertilizer = uses_fertilizer.lower() == 'true'
             seed_variety = data.get('seed_variety')
             planting_date = data.get('datePlanted')
+            
+            logger.info(f"Risk assessment request: POST - lat:{latitude}, lon:{longitude}, crop:{crop}, area:{area or area_hectares or area_acres}, planted:{planting_date}")
             
             # Validate required parameters
             if latitude is None or longitude is None:
@@ -1952,8 +1977,9 @@ def assess_crop_risk():
                 longitude = float(longitude)
                 if elevation is not None:
                     elevation = int(elevation)
-                if area is not None:
-                    area = float(area)
+                if area is not None: area = float(area)
+                if area_acres is not None: area_acres = float(area_acres)
+                if area_hectares is not None: area_hectares = float(area_hectares)
             except (ValueError, TypeError):
 
                 return jsonify({
@@ -2097,11 +2123,16 @@ def assess_crop_risk():
                 # NEW: YIELD PREDICTION INTEGRATION
                 # ------------------------------------------------------------
                 crop_yield_data = None
-                if area is not None:
+                # Prioritize area_hectares, then area (assumed hectares if from new frontend), then area_acres
+                target_area_ha = area_hectares if area_hectares is not None else area
+                target_area_ac = area_acres if area_acres is not None else (None if target_area_ha is not None else None)
+
+                if target_area_ha is not None or target_area_ac is not None:
                     suitability = crop_suitability.get(crop, 50)
                     crop_yield_data = risk_engine.calculate_yield_prediction(
                         crop=crop,
-                        area_acres=area,
+                        area_acres=target_area_ac,
+                        area_hectares=target_area_ha,
                         fertilizer=uses_fertilizer,
                         seed_variety=seed_variety,
                         suitability_score=suitability,
@@ -2147,6 +2178,8 @@ def assess_crop_risk():
                 legacy_risk_assessment[crop.upper()] = {
                     'risk_level': risk_level,
                     'risk_score': round(risk_score, 2),
+                    'growth_stage': data.get('growth_stage', {}).get('stage', 'Unknown'),
+                    'growing_days': data.get('growth_stage', {}).get('days_after_planting', 0),
                     'predicted_yield': crop_yield_data if crop_yield_data else "Area not provided",
                     'components': {
                         'price_volatility': comp.get('market_volatility', 0),
@@ -2173,7 +2206,8 @@ def assess_crop_risk():
                 'longitude': longitude,
                 'elevation': elevation,
                 'field_location': field_location,
-                'area_acres': area
+                'area_hectares': area_hectares or (area if area is not None else None),
+                'area_acres': area_acres
             },
             'suitability_data': crop_suitability,
             'weather_forecast': {
