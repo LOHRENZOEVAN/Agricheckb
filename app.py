@@ -1070,6 +1070,18 @@ def safe_get_param(data: Any, keys: List[str], default: Any = None) -> Any:
     # 1. Search current level (case-insensitive)
     for k, v in data.items():
         if k.lower() in keys_lower and v is not None and v != "":
+            # If value is a string that looks like JSON, try to parse it
+            if isinstance(v, str) and (v.startswith('{') or v.startswith('[')):
+                try:
+                    import json
+                    parsed = json.loads(v)
+                    if isinstance(parsed, dict):
+                        # If it's a dict, we can keep searching inside it or return it
+                        # For keys like 'area', if the whole dict is the area, return it
+                        # but usually it's better to continue searching.
+                        pass
+                except:
+                    pass
             return v
     
     # 2. Recursive search into nested dictionaries
@@ -1078,8 +1090,84 @@ def safe_get_param(data: Any, keys: List[str], default: Any = None) -> Any:
             res = safe_get_param(v, keys, None)
             if res is not None:
                 return res
+        elif isinstance(v, str) and (v.startswith('{') or v.startswith('[')):
+            try:
+                import json
+                parsed = json.loads(v)
+                if isinstance(parsed, dict):
+                    res = safe_get_param(parsed, keys, None)
+                    if res is not None:
+                        return res
+            except:
+                pass
                 
     return default
+
+def calculate_area_from_coords(coords_input: Any) -> Optional[float]:
+    """
+    Calculate area in hectares from GeoJSON coordinates using Shoelace formula.
+    Supports both JSON string and already-parsed list/array.
+    """
+    try:
+        import json
+        import math
+        
+        if not coords_input:
+            return None
+            
+        # 1. Handle string vs list input
+        data = coords_input
+        if isinstance(coords_input, str):
+            # Handle cases where it might be double-encoded or have extra quotes
+            if coords_input.startswith('"') and coords_input.endswith('"'):
+                coords_input = coords_input[1:-1]
+            try:
+                data = json.loads(coords_input)
+            except:
+                return None
+        
+        # 2. Extract polygon coordinates
+        # Expected: [[[lon, lat], [lon, lat], ...]] (GeoJSON Polygon)
+        # or [[lon, lat], [lon, lat], ...] (LinearRing)
+        poly = None
+        if isinstance(data, list) and len(data) > 0:
+            if isinstance(data[0], list) and len(data[0]) > 0 and not isinstance(data[0][0], (int, float)):
+                # Nested list (GeoJSON structure)
+                poly = data[0]
+            else:
+                # Flat list of points
+                poly = data
+        
+        if not poly or len(poly) < 3: 
+            return None
+            
+        # 3. Calculate area in square degrees using Shoelace formula
+        area = 0.0
+        sum_lat = 0.0
+        for i in range(len(poly) - 1):
+            area += (poly[i][0] * poly[i+1][1])
+            area -= (poly[i+1][0] * poly[i][1])
+            sum_lat += poly[i][1]
+        
+        # Close the polygon if not closed
+        area += (poly[-1][0] * poly[0][1])
+        area -= (poly[0][0] * poly[-1][1])
+        sum_lat += poly[-1][1]
+        
+        area = abs(area) / 2.0
+        avg_lat = sum_lat / len(poly)
+        
+        # 4. Convert square degrees to hectares (Ghana-optimized)
+        # 1 degree lat ~ 111km, 1 degree lon ~ 111km * cos(lat)
+        # Conversion factor for m2: 111320 * 111320 * cos(avg_lat)
+        # Conversion to hectares: factor / 10000
+        lat_rad = math.radians(avg_lat)
+        conversion_factor = 1239210.0 * math.cos(lat_rad)
+        
+        return round(area * conversion_factor, 4)
+    except Exception as e:
+        logger.warning(f"Smarter Area calculation failed: {str(e)}")
+        return None
 
 def safe_float(value, default=None):
     """Safely convert a value to float"""
@@ -1933,6 +2021,9 @@ def assess_crop_risk():
             params.update(json_data)
             
         logger.info(f"Aggregated request params: {list(params.keys())}")
+        raw_data = request.get_data(as_text=True)
+        if raw_data:
+            logger.info(f"RAW REQUEST BODY: {raw_data[:1000]}")
         
         # 1. Basic Coordinates (Required)
         latitude = safe_get_param(params, ['latitude', 'lat'])
@@ -1965,6 +2056,27 @@ def assess_crop_risk():
                 'message': 'Missing required parameters: latitude and longitude'
             }), 400
             
+        # 5. HEURISTIC DISCOVERY (Rescue logic for missing parameters)
+        # Try to recover planting date from other fields (like farm_id or name)
+        if planting_date is None:
+            import re
+            for k, v in params.items():
+                if isinstance(v, str) and len(v) >= 10:
+                    # Look for YYYY-MM-DD pattern
+                    match = re.search(r'(\d{4}-\d{2}-\d{2})', v)
+                    if match:
+                        planting_date = match.group(1)
+                        logger.info(f"Rescue Logic: Found planting date {planting_date} in parameter '{k}'")
+                        break
+        
+        # Try to calculate area from fieldCoordinates if missing
+        if area_hectares is None and area_acres is None and area is None:
+            field_coords = safe_get_param(params, ['fieldCoordinates', 'coordinates', 'polygon', 'field_coords'])
+            if field_coords:
+                area_hectares = calculate_area_from_coords(field_coords)
+                if area_hectares:
+                    logger.info(f"Rescue Logic: Calculated area {area_hectares} Ha from fieldCoordinates")
+
         try:
             latitude = float(latitude)
             longitude = float(longitude)
@@ -2036,7 +2148,7 @@ def assess_crop_risk():
                 crop_suitability[target_crop] = 50  # Default medium suitability
         
         # Filter price data to relevant crops
-        if crop_type or crop:
+        if crop:
             filtered_price_data = pd.DataFrame()
             
             for col in global_price_data.columns:
@@ -2189,7 +2301,7 @@ def assess_crop_risk():
             'api_version': '2.3-YIELD',
             # Legacy compatibility - existing frontend code works unchanged
             'risk_assessment': legacy_risk_assessment,
-            'yield_predictions': yield_predictions if (target_area_ha or target_area_ac) else "Area parameter missing for yield prediction",
+            'yield_predictions': yield_predictions if (target_area_ha or target_area_ac) else f"Area missing. Received keys: {list(params.keys())}",
             'location': {
                 'latitude': latitude,
                 'longitude': longitude,
