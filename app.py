@@ -271,9 +271,19 @@ class GhanaDataDrivenRiskEngine:
             if not planting_date:
                 return {'stage': 'Unknown', 'dap': 0, 'multiplier': 1.0}
                 
-            from datetime import datetime
-            p_date = datetime.fromisoformat(planting_date.replace('Z', '+00:00'))
-            now = datetime.now(p_date.tzinfo)
+            from dateutil import parser
+            if isinstance(planting_date, str):
+                p_date = parser.parse(planting_date)
+            else:
+                return {'stage': 'Unknown', 'dap': 0, 'multiplier': 1.0}
+                
+            now = datetime.now(p_date.tzinfo if p_date.tzinfo else None)
+            # Ensure p_date is naive if now is naive, or both aware
+            if p_date.tzinfo and not now.tzinfo:
+                now = datetime.now(p_date.tzinfo)
+            elif not p_date.tzinfo and now.tzinfo:
+                p_date = p_date.replace(tzinfo=now.tzinfo)
+            
             dap = (now - p_date).days
             
             # Crop-specific stages
@@ -1898,14 +1908,22 @@ def assess_crop_risk():
             crop = request.args.get('crop', '').lower()
             
             # New yield-related parameters (Flexible naming)
+            # Log all query parameters for debugging
+            logger.info(f"Incoming GET params: {list(request.args.keys())}")
+            
+            # Flexible extraction for area
+            area_hectares = request.args.get('area_hectares') or request.args.get('areaHectares') or request.args.get('hectares')
+            area_acres = request.args.get('area_acres') or request.args.get('areaAcres') or request.args.get('acres')
             area = request.args.get('area')
-            area_acres = request.args.get('area_acres')
-            area_hectares = request.args.get('area_hectares')
-            uses_fertilizer = request.args.get('uses_fertilizer')
+            
+            # Flexible extraction for planting date
+            planting_date = (request.args.get('datePlanted') or request.args.get('plantingDate') or 
+                           request.args.get('date_planted') or request.args.get('planting_date'))
+            
+            uses_fertilizer = request.args.get('uses_fertilizer') or request.args.get('fertilizer')
             if uses_fertilizer is not None:
-                uses_fertilizer = uses_fertilizer.lower() == 'true'
-            seed_variety = request.args.get('seed_variety')
-            planting_date = request.args.get('datePlanted')
+                uses_fertilizer = str(uses_fertilizer).lower() == 'true'
+            seed_variety = request.args.get('seed_variety') or request.args.get('seedVariety')
             
             logger.info(f"Risk assessment request: GET - lat:{latitude}, lon:{longitude}, crop:{crop}, area:{area or area_hectares or area_acres}, planted:{planting_date}")
             
@@ -1954,14 +1972,25 @@ def assess_crop_risk():
             crop = data.get('crop', '').lower()
             
             # New yield-related parameters (Flexible naming)
+            # Log all JSON keys for debugging
+            logger.info(f"Incoming POST keys: {list(data.keys())}")
+            
+            # Flexible extraction for area
+            area_hectares = data.get('area_hectares') or data.get('areaHectares') or data.get('hectares')
+            area_acres = data.get('area_acres') or data.get('areaAcres') or data.get('acres')
             area = data.get('area')
-            area_acres = data.get('area_acres')
-            area_hectares = data.get('area_hectares')
-            uses_fertilizer = data.get('uses_fertilizer')
-            if isinstance(uses_fertilizer, str):
-                uses_fertilizer = uses_fertilizer.lower() == 'true'
-            seed_variety = data.get('seed_variety')
-            planting_date = data.get('datePlanted')
+            
+            # Flexible extraction for planting date
+            planting_date = (data.get('datePlanted') or data.get('plantingDate') or 
+                           data.get('date_planted') or data.get('planting_date'))
+            
+            uses_fertilizer = data.get('uses_fertilizer') or data.get('fertilizer')
+            if uses_fertilizer is not None:
+                if isinstance(uses_fertilizer, str):
+                    uses_fertilizer = uses_fertilizer.lower() == 'true'
+                elif isinstance(uses_fertilizer, bool):
+                    pass
+            seed_variety = data.get('seed_variety') or data.get('seedVariety')
             
             logger.info(f"Risk assessment request: POST - lat:{latitude}, lon:{longitude}, crop:{crop}, area:{area or area_hectares or area_acres}, planted:{planting_date}")
             
