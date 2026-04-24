@@ -269,13 +269,13 @@ class GhanaDataDrivenRiskEngine:
         """
         try:
             if not planting_date:
-                return {'stage': 'Unknown', 'dap': 0, 'multiplier': 1.0}
+                return {'stage': 'Unknown', 'days_after_planting': 0, 'sensitivity_multiplier': 1.0}
                 
             from dateutil import parser
             if isinstance(planting_date, str):
                 p_date = parser.parse(planting_date)
             else:
-                return {'stage': 'Unknown', 'dap': 0, 'multiplier': 1.0}
+                return {'stage': 'Unknown', 'days_after_planting': 0, 'sensitivity_multiplier': 1.0}
                 
             now = datetime.now(p_date.tzinfo if p_date.tzinfo else None)
             # Ensure p_date is naive if now is naive, or both aware
@@ -313,7 +313,7 @@ class GhanaDataDrivenRiskEngine:
             }
         except Exception as e:
             logger.error(f"Error calculating growth stage: {str(e)}")
-            return {'stage': 'Unknown', 'dap': 0, 'multiplier': 1.0}
+            return {'stage': 'Unknown', 'days_after_planting': 0, 'sensitivity_multiplier': 1.0}
 
     def _get_stage_multiplier(self, stage: str) -> float:
         """Get risk sensitivity multiplier for a specific stage"""
@@ -1986,7 +1986,7 @@ def assess_crop_risk():
             }), 400
         
         # Log the request for debugging
-        logger.info(f"Risk assessment request: {request.method} - lat:{latitude}, lon:{longitude}, crop:{crop_type}")
+        logger.info(f"Risk assessment request: {request.method} - lat:{latitude}, lon:{longitude}, crop:{crop}")
         
         # Check if price data is available
         if global_price_data.empty:
@@ -2189,7 +2189,7 @@ def assess_crop_risk():
             'api_version': '2.3-YIELD',
             # Legacy compatibility - existing frontend code works unchanged
             'risk_assessment': legacy_risk_assessment,
-            'yield_predictions': yield_predictions if area else "Area parameter missing for yield prediction",
+            'yield_predictions': yield_predictions if (target_area_ha or target_area_ac) else "Area parameter missing for yield prediction",
             'location': {
                 'latitude': latitude,
                 'longitude': longitude,
