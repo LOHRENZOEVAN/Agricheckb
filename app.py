@@ -1056,6 +1056,26 @@ class GhanaDataDrivenRiskEngine:
 # HELPER FUNCTIONS
 # ================================================================
 
+def safe_get_param(data: Any, keys: List[str], default: Any = None) -> Any:
+    """Robustly search for a parameter in a dictionary, including common nested structures."""
+    if not isinstance(data, dict):
+        return default
+    
+    # 1. Search top level
+    for key in keys:
+        if key in data and data[key] is not None:
+            return data[key]
+    
+    # 2. Search common nested objects (location, satellite, data, attributes)
+    nested_keys = ['location', 'satellite', 'data', 'attributes', 'field']
+    for nk in nested_keys:
+        if nk in data and isinstance(data[nk], dict):
+            for key in keys:
+                if key in data[nk] and data[nk][key] is not None:
+                    return data[nk][key]
+    
+    return default
+
 def safe_float(value, default=None):
     """Safely convert a value to float"""
     if value is None:
@@ -1903,29 +1923,28 @@ def assess_crop_risk():
             latitude = request.args.get('latitude')
             longitude = request.args.get('longitude')
             elevation = request.args.get('elevation')
-            crop_type = request.args.get('crop_type')
-            field_location = request.args.get('field_location')
-            crop = request.args.get('crop', '').lower()
-            
-            # New yield-related parameters (Flexible naming)
             # Log all query parameters for debugging
             logger.info(f"Incoming GET params: {list(request.args.keys())}")
             
-            # Flexible extraction for area
-            area_hectares = request.args.get('area_hectares') or request.args.get('areaHectares') or request.args.get('hectares')
-            area_acres = request.args.get('area_acres') or request.args.get('areaAcres') or request.args.get('acres')
+            # Robust extraction using safe_get_param
+            crop = safe_get_param(request.args, ['crop', 'crop_type', 'cropType', 'commodity'])
+            crop = crop.lower() if crop else ''
+            
+            field_location = safe_get_param(request.args, ['field_location', 'fieldLocation', 'locationName', 'location'])
+            
+            area_hectares = safe_get_param(request.args, ['area_hectares', 'areaHectares', 'hectares', 'hectare_area'])
+            area_acres = safe_get_param(request.args, ['area_acres', 'areaAcres', 'acres', 'acre_area'])
             area = request.args.get('area')
             
-            # Flexible extraction for planting date
-            planting_date = (request.args.get('datePlanted') or request.args.get('plantingDate') or 
-                           request.args.get('date_planted') or request.args.get('planting_date'))
+            planting_date = safe_get_param(request.args, ['datePlanted', 'plantingDate', 'date_planted', 'planting_date', 'plantedDate'])
             
-            uses_fertilizer = request.args.get('uses_fertilizer') or request.args.get('fertilizer')
+            uses_fertilizer = safe_get_param(request.args, ['uses_fertilizer', 'fertilizer', 'use_fertilizer'])
             if uses_fertilizer is not None:
                 uses_fertilizer = str(uses_fertilizer).lower() == 'true'
-            seed_variety = request.args.get('seed_variety') or request.args.get('seedVariety')
             
-            logger.info(f"Risk assessment request: GET - lat:{latitude}, lon:{longitude}, crop:{crop}, area:{area or area_hectares or area_acres}, planted:{planting_date}")
+            seed_variety = safe_get_param(request.args, ['seed_variety', 'seedVariety', 'variety'])
+            
+            logger.info(f"Risk assessment request: GET - lat:{latitude}, lon:{longitude}, crop:{crop}, area_ha:{area_hectares}, planted:{planting_date}")
             
             # Validate required parameters
             if latitude is None or longitude is None:
@@ -1967,32 +1986,33 @@ def assess_crop_risk():
             latitude = data.get('latitude')
             longitude = data.get('longitude')
             elevation = data.get('elevation')
-            crop_type = data.get('crop_type')
-            field_location = data.get('field_location')
-            crop = data.get('crop', '').lower()
-            
-            # New yield-related parameters (Flexible naming)
             # Log all JSON keys for debugging
             logger.info(f"Incoming POST keys: {list(data.keys())}")
             
-            # Flexible extraction for area
-            area_hectares = data.get('area_hectares') or data.get('areaHectares') or data.get('hectares')
-            area_acres = data.get('area_acres') or data.get('areaAcres') or data.get('acres')
+            # Robust extraction using safe_get_param
+            crop = safe_get_param(data, ['crop', 'crop_type', 'cropType', 'commodity'])
+            crop = crop.lower() if crop else ''
+            
+            field_location = safe_get_param(data, ['field_location', 'fieldLocation', 'locationName', 'location'])
+            
+            # Area extraction
+            area_hectares = safe_get_param(data, ['area_hectares', 'areaHectares', 'hectares', 'hectare_area'])
+            area_acres = safe_get_param(data, ['area_acres', 'areaAcres', 'acres', 'acre_area'])
             area = data.get('area')
             
-            # Flexible extraction for planting date
-            planting_date = (data.get('datePlanted') or data.get('plantingDate') or 
-                           data.get('date_planted') or data.get('planting_date'))
+            # Planting date extraction
+            planting_date = safe_get_param(data, ['datePlanted', 'plantingDate', 'date_planted', 'planting_date', 'plantedDate'])
             
-            uses_fertilizer = data.get('uses_fertilizer') or data.get('fertilizer')
+            uses_fertilizer = safe_get_param(data, ['uses_fertilizer', 'fertilizer', 'use_fertilizer'])
             if uses_fertilizer is not None:
                 if isinstance(uses_fertilizer, str):
                     uses_fertilizer = uses_fertilizer.lower() == 'true'
                 elif isinstance(uses_fertilizer, bool):
                     pass
-            seed_variety = data.get('seed_variety') or data.get('seedVariety')
             
-            logger.info(f"Risk assessment request: POST - lat:{latitude}, lon:{longitude}, crop:{crop}, area:{area or area_hectares or area_acres}, planted:{planting_date}")
+            seed_variety = safe_get_param(data, ['seed_variety', 'seedVariety', 'variety'])
+            
+            logger.info(f"Risk assessment request: POST - lat:{latitude}, lon:{longitude}, crop:{crop}, area_ha:{area_hectares}, planted:{planting_date}")
             
             # Validate required parameters
             if latitude is None or longitude is None:
@@ -2048,9 +2068,7 @@ def assess_crop_risk():
         monthly_data = process_seasonal_forecast(seasonal_data_response)
         
         # Determine target crops
-        if crop_type:
-            target_crops = [crop_type.lower()]
-        elif crop:
+        if crop:
             target_crops = [crop.lower()]
         else:
             target_crops = ['maize', 'rice', 'soya']
@@ -2235,7 +2253,7 @@ def assess_crop_risk():
                 'longitude': longitude,
                 'elevation': elevation,
                 'field_location': field_location,
-                'area_hectares': area_hectares or (area if area is not None else None),
+                'area_hectares': area_hectares if area_hectares is not None else (area if area is not None else None),
                 'area_acres': area_acres
             },
             'suitability_data': crop_suitability,
