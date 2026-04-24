@@ -1057,23 +1057,28 @@ class GhanaDataDrivenRiskEngine:
 # ================================================================
 
 def safe_get_param(data: Any, keys: List[str], default: Any = None) -> Any:
-    """Robustly search for a parameter in a dictionary, including common nested structures."""
+    """
+    Robustly search for a parameter in a dictionary or nested structure.
+    Case-insensitive and recursive.
+    """
     if not isinstance(data, dict):
         return default
     
-    # 1. Search top level
-    for key in keys:
-        if key in data and data[key] is not None:
-            return data[key]
+    # Normalize keys to lower case for comparison
+    keys_lower = [k.lower() for k in keys]
     
-    # 2. Search common nested objects (location, satellite, data, attributes)
-    nested_keys = ['location', 'satellite', 'data', 'attributes', 'field']
-    for nk in nested_keys:
-        if nk in data and isinstance(data[nk], dict):
-            for key in keys:
-                if key in data[nk] and data[nk][key] is not None:
-                    return data[nk][key]
+    # 1. Search current level (case-insensitive)
+    for k, v in data.items():
+        if k.lower() in keys_lower and v is not None and v != "":
+            return v
     
+    # 2. Recursive search into nested dictionaries
+    for v in data.values():
+        if isinstance(v, dict):
+            res = safe_get_param(v, keys, None)
+            if res is not None:
+                return res
+                
     return default
 
 def safe_float(value, default=None):
@@ -1915,126 +1920,63 @@ def get_weather_forecast_endpoint():
 
 @app.route('/assess-crop-risk', methods=['GET', 'POST'])
 def assess_crop_risk():
-    """FIXED: Enhanced endpoint for Ghana-specific crop risk assessment with ML integration"""
     try:
-        # Handle both GET and POST requests
-        if request.method == 'GET':
-            # Extract parameters from query string for GET requests
-            latitude = request.args.get('latitude')
-            longitude = request.args.get('longitude')
-            elevation = request.args.get('elevation')
-            # Log all query parameters for debugging
-            logger.info(f"Incoming GET params: {list(request.args.keys())}")
+        # COMBINED PARAMETER EXTRACTION (Bulletproof v3.0)
+        # This version combines all sources: URL args, Form data, and JSON body
+        params = {}
+        if request.args:
+            params.update(request.args.to_dict())
+        if request.form:
+            params.update(request.form.to_dict())
+        json_data = request.get_json(silent=True)
+        if json_data and isinstance(json_data, dict):
+            params.update(json_data)
             
-            # Robust extraction using safe_get_param
-            crop = safe_get_param(request.args, ['crop', 'crop_type', 'cropType', 'commodity'])
-            crop = crop.lower() if crop else ''
-            
-            field_location = safe_get_param(request.args, ['field_location', 'fieldLocation', 'locationName', 'location'])
-            
-            area_hectares = safe_get_param(request.args, ['area_hectares', 'areaHectares', 'hectares', 'hectare_area'])
-            area_acres = safe_get_param(request.args, ['area_acres', 'areaAcres', 'acres', 'acre_area'])
-            area = request.args.get('area')
-            
-            planting_date = safe_get_param(request.args, ['datePlanted', 'plantingDate', 'date_planted', 'planting_date', 'plantedDate'])
-            
-            uses_fertilizer = safe_get_param(request.args, ['uses_fertilizer', 'fertilizer', 'use_fertilizer'])
-            if uses_fertilizer is not None:
-                uses_fertilizer = str(uses_fertilizer).lower() == 'true'
-            
-            seed_variety = safe_get_param(request.args, ['seed_variety', 'seedVariety', 'variety'])
-            
-            logger.info(f"Risk assessment request: GET - lat:{latitude}, lon:{longitude}, crop:{crop}, area_ha:{area_hectares}, planted:{planting_date}")
-            
-            # Validate required parameters
-            if latitude is None or longitude is None:
-                return jsonify({
-                    'status': 'error',
-                    'message': 'Missing required parameters: latitude and longitude'
-                }), 400
-            
-            # Convert to appropriate types
-            try:
-                latitude = float(latitude)
-                longitude = float(longitude)
-                if elevation is not None:
-                    elevation = int(elevation)
-                if area is not None: area = float(area)
-                if area_acres is not None: area_acres = float(area_acres)
-                if area_hectares is not None: area_hectares = float(area_hectares)
-            except (ValueError, TypeError):
-                return jsonify({
-                    'status': 'error',
-                    'message': 'Invalid parameter format'
-                }), 400
-                
-        elif request.method == 'POST':
-            # Handle POST requests
-            try:
-                data = request.get_json(silent=True)
-            except Exception as e:
-                logger.error(f"Error parsing JSON: {str(e)}")
-                data = None
-                
-            if not data or not isinstance(data, dict):
-                return jsonify({
-                    'status': 'error',
-                    'message': 'Invalid JSON data format or empty request'
-                }), 400
-            
-            # Extract parameters from JSON body
-            latitude = data.get('latitude')
-            longitude = data.get('longitude')
-            elevation = data.get('elevation')
-            # Log all JSON keys for debugging
-            logger.info(f"Incoming POST keys: {list(data.keys())}")
-            
-            # Robust extraction using safe_get_param
-            crop = safe_get_param(data, ['crop', 'crop_type', 'cropType', 'commodity'])
-            crop = crop.lower() if crop else ''
-            
-            field_location = safe_get_param(data, ['field_location', 'fieldLocation', 'locationName', 'location'])
-            
-            # Area extraction
-            area_hectares = safe_get_param(data, ['area_hectares', 'areaHectares', 'hectares', 'hectare_area'])
-            area_acres = safe_get_param(data, ['area_acres', 'areaAcres', 'acres', 'acre_area'])
-            area = data.get('area')
-            
-            # Planting date extraction
-            planting_date = safe_get_param(data, ['datePlanted', 'plantingDate', 'date_planted', 'planting_date', 'plantedDate'])
-            
-            uses_fertilizer = safe_get_param(data, ['uses_fertilizer', 'fertilizer', 'use_fertilizer'])
-            if uses_fertilizer is not None:
-                if isinstance(uses_fertilizer, str):
-                    uses_fertilizer = uses_fertilizer.lower() == 'true'
-                elif isinstance(uses_fertilizer, bool):
-                    pass
-            
-            seed_variety = safe_get_param(data, ['seed_variety', 'seedVariety', 'variety'])
-            
-            logger.info(f"Risk assessment request: POST - lat:{latitude}, lon:{longitude}, crop:{crop}, area_ha:{area_hectares}, planted:{planting_date}")
-            
-            # Validate required parameters
-            if latitude is None or longitude is None:
-                return jsonify({
-                    'status': 'error',
-                    'message': 'Missing required parameters: latitude and longitude'
-                }), 400
-            
-            try:
-                latitude = float(latitude)
-                longitude = float(longitude)
-                if elevation is not None:
-                    elevation = int(elevation)
-                if area is not None: area = float(area)
-                if area_acres is not None: area_acres = float(area_acres)
-                if area_hectares is not None: area_hectares = float(area_hectares)
-            except (ValueError, TypeError):
+        logger.info(f"Aggregated request params: {list(params.keys())}")
+        
+        # 1. Basic Coordinates (Required)
+        latitude = safe_get_param(params, ['latitude', 'lat'])
+        longitude = safe_get_param(params, ['longitude', 'lon', 'lng'])
+        elevation = safe_get_param(params, ['elevation', 'alt'])
+        
+        # 2. Crop & Location
+        crop = safe_get_param(params, ['crop', 'crop_type', 'cropType', 'commodity', 'target_crop'])
+        crop = crop.lower() if crop else ''
+        field_location = safe_get_param(params, ['field_location', 'fieldLocation', 'locationName', 'location'])
+        
+        # 3. Area (Priority: Hectares > Acres)
+        area_hectares = safe_get_param(params, ['area_hectares', 'areaHectares', 'hectares', 'ha'])
+        area_acres = safe_get_param(params, ['area_acres', 'areaAcres', 'acres', 'ac'])
+        area = params.get('area') # Generic fallback
+        
+        # 4. Planting & Management
+        planting_date = safe_get_param(params, ['datePlanted', 'plantingDate', 'date_planted', 'planting_date', 'plantedDate', 'date_planted'])
+        uses_fertilizer = safe_get_param(params, ['uses_fertilizer', 'fertilizer', 'use_fertilizer'])
+        if uses_fertilizer is not None:
+            uses_fertilizer = str(uses_fertilizer).lower() == 'true'
+        seed_variety = safe_get_param(params, ['seed_variety', 'seedVariety', 'variety', 'seed'])
 
-                return jsonify({
-                    'status': 'error',
-                    'message': 'Invalid coordinates format. Latitude and longitude must be numbers.'
-                }), 400
+        logger.info(f"Extracted Params -> lat:{latitude}, lon:{longitude}, crop:{crop}, area_ha:{area_hectares}, area_ac:{area_acres}, planted:{planting_date}")
+        
+        # Validate required parameters
+        if latitude is None or longitude is None:
+            return jsonify({
+                'status': 'error',
+                'message': 'Missing required parameters: latitude and longitude'
+            }), 400
+            
+        try:
+            latitude = float(latitude)
+            longitude = float(longitude)
+            if elevation is not None: elevation = int(elevation)
+            if area is not None: area = float(area)
+            if area_acres is not None: area_acres = float(area_acres)
+            if area_hectares is not None: area_hectares = float(area_hectares)
+        except (ValueError, TypeError):
+            return jsonify({
+                'status': 'error',
+                'message': 'Invalid parameter format (lat/lon/area must be numbers)'
+            }), 400
         
         # Validate coordinate ranges
         if not (-90 <= latitude <= 90) or not (-180 <= longitude <= 180):
