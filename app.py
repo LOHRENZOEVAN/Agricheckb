@@ -1,5 +1,9 @@
-from flask import Flask, jsonify, request
-from flask_cors import CORS
+try:
+    from flask import Flask, jsonify, request
+    from flask_cors import CORS
+except ImportError as e:
+    raise ImportError(f"Flask and Flask-CORS not installed. Run: pip install flask flask-cors") from e
+
 import numpy as np
 import pandas as pd
 import os

@@ -1,41 +1,41 @@
 setuptools==80.9.0
 wheel==0.45.1
 numpy==1.26.4
-# Core Flask Dependencies
-Flask==2.3.3
-Flask-CORS==4.0.0
-Werkzeug==2.3.7
+
+# Core Flask Dependencies - UPDATED
+Flask==3.0.3
+Flask-CORS==5.0.0
+Werkzeug==3.0.3
 
 # Data Processing
 pandas==2.0.3
 
+# Machine Learning - UPDATED
+scikit-learn==1.5.0
+joblib==1.4.2
 
-# Machine Learning
-scikit-learn==1.3.0
-joblib==1.3.2
-
-# HTTP Requests
-requests==2.31.0
-urllib3==2.0.4
-certifi==2023.7.22
+# HTTP Requests - UPDATED
+requests==2.32.3
+urllib3==2.0.7
+certifi==2024.7.4
 
 # Environment Variables
-python-dotenv==1.0.0
+python-dotenv==1.0.1
 
 # Date/Time Processing
-python-dateutil==2.8.2
-pytz==2023.3
+python-dateutil==2.9.0
+pytz==2024.1
 
-# Production Server (REQUIRED for Render)
-gunicorn==21.2.0
+# Production Server - UPDATED
+gunicorn==22.0.0
 
-# Flask Dependencies
+# Flask Dependencies - UPDATED
 click==8.1.7
-itsdangerous==2.1.2
-Jinja2==3.1.2
-MarkupSafe==2.1.3
+itsdangerous==2.2.0
+Jinja2==3.1.4
+MarkupSafe==2.1.5
 
-# Data Science Dependencies (REQUIRED by scikit-learn)
+# Data Science Dependencies
 scipy==1.11.2
-threadpoolctl==3.2.0
+threadpoolctl==3.5.0
 six==1.16.0
